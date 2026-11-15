@@ -256,7 +256,7 @@ function InlineBlockEditor({
   const [alignment, setAlignment] = useState<BlockAlignment>(block.alignment ?? 'left');
   const [fontSizePt, setFontSizePt] = useState<number>(getBlockFontSizePt(block));
   const [isBoldAll, setIsBoldAll] = useState<boolean>(
-    block.block_type === 'heading' || isUniformBlockStyle(block.segments, 'bold')
+    isUniformBlockStyle(block.segments, 'bold')
   );
   const [isItalicAll, setIsItalicAll] = useState<boolean>(
     isUniformBlockStyle(block.segments, 'italic')
@@ -872,7 +872,7 @@ function InlineBlockEditor({
         {previewSegments.length > 0 ? (
           <RenderSegments
             segments={previewSegments}
-            defaultBold={blockType === 'heading'}
+            defaultBold={false}
             baseFontPt={fontSizePt}
             scale={1.25}
             mathFormat={mathFormat}
@@ -983,7 +983,7 @@ function RenderSingleBlock({
       <h3 style={wrapperStyle} className={`${alignClass}`}>
         <RenderSegments
           segments={blk.segments}
-          defaultBold={true}
+          defaultBold={false}
           baseFontPt={baseFontPt}
           scale={scale}
           mathFormat={mathFormat}
@@ -1183,7 +1183,7 @@ function RenderSingleBlock({
                     >
                       <RenderSegments
                         segments={cell.segments}
-                        defaultBold={isHeader}
+                        defaultBold={false}
                         baseFontPt={isBorderless ? baseFontPt : Math.min(baseFontPt, 11)}
                         scale={scale}
                         mathFormat={mathFormat}

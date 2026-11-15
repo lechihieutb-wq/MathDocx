@@ -43,9 +43,19 @@ const inlineSegmentSchema = {
       type: Type.STRING,
       description: 'Text content or pure LaTeX without $ or \\( \\) delimiters.',
     },
-    bold: { type: Type.BOOLEAN },
-    italic: { type: Type.BOOLEAN },
-    underline: { type: Type.BOOLEAN },
+    bold: {
+      type: Type.BOOLEAN,
+      description:
+        'True ONLY if the visual stroke weight in the PDF is clearly boldface (thicker/heavier than normal body text). Must be false or omitted for normal-weight text, including non-bold headings, subtitles, italic notes, table headers without bold strokes, and body text after "Câu 1." or "A.".',
+    },
+    italic: {
+      type: Type.BOOLEAN,
+      description: 'True only if the text in the PDF is visually italicized/slanted.',
+    },
+    underline: {
+      type: Type.BOOLEAN,
+      description: 'True only if the text in the PDF has an explicit underline stroke.',
+    },
     font_size_pt: {
       type: Type.NUMBER,
       description: 'Optional font size in pt when different from block font_size_pt.',
@@ -178,10 +188,13 @@ Quy tắc bắt buộc:
 1. TỌA ĐỘ & VỊ TRÍ CHÍNH XÁC (box_2d):
    - BẮT BUỘC trả về box_2d=[ymin, xmin, ymax, xmax] trên thang chuẩn hóa 0..1000 cho MỌI khối (heading, paragraph, equation, table, figure, horizontal_rule).
    - Hệ thống dùng box_2d để tính chính xác lề trang, khoảng cách dọc giữa các đoạn, vị trí thụt lề ngang, độ rộng hình vẽ và bố cục đặt cạnh nhau (ví dụ: đề bài bên trái, hình vẽ bên phải).
-2. ĐỊNH DẠNG IN ĐẬM / IN NGHIÊNG / GẠCH CHÂN / CỠ CHỮ / MÀU SẮC:
-   - Tách từng đoạn chữ có định dạng khác nhau thành các segment riêng biệt với bold, italic, underline, font_size_pt, color chính xác từng từ/cụm từ!
-   - TUYỆT ĐỐI KHÔNG tự ý đánh dấu bold=true cho toàn bộ câu nếu chỉ có nhãn "Câu 1.", "Bài 1.", "Lời giải:", "Đáp án:" được in đậm. Ví dụ: segment 1 ("Câu 1. ", bold: true), segment 2 ("Tính tích phân:", bold: false).
-   - Với heading cũng phải ghi rõ bold/italic từng segment đúng như bản gốc (ví dụ dòng phụ đề in nghiêng không đậm phải để bold: false, italic: true).
+2. ĐỊNH DẠNG IN ĐẬM / IN NGHIÊNG / GẠCH CHÂN / CỠ CHỮ / MÀU SẮC (ĐÚNG 100% THEO TRANG PDF GỐC):
+   - Quan sát kỹ độ dày nét chữ (stroke weight) trên ảnh PDF: CHỈ đặt bold=true cho các từ/cụm từ THỰC SỰ IN ĐẬM (nét chữ dày đậm rõ rệt hơn văn bản thường).
+   - MỌI chữ có nét mảnh/bình thường trên PDF — kể cả tiêu đề phụ, dòng căn giữa, dòng cỡ chữ lớn hơn, chữ in nghiêng, ghi chú trong ngoặc, hàng tiêu đề bảng không in đậm, phần đề bài sau "Câu 1.", hoặc nội dung đáp án sau "A.", "B.", "C.", "D." — TUYỆT ĐỐI KHÔNG được gán bold=true (bắt buộc để bold=false hoặc bỏ qua thuộc tính bold).
+   - BẮT BUỘC tách thành các segment riêng mỗi khi đổi định dạng trên cùng một dòng! Ví dụ:
+     + "Câu 1. Cho hàm số..." -> segment 1 ("Câu 1. ", bold: true), segment 2 ("Cho hàm số...", bold: false). Không được gán bold=true cho cả câu.
+     + "A. x = 2" -> nếu chỉ "A." in đậm thì tách segment 1 ("A. ", bold: true) và segment 2 (math "x = 2"); nếu "A." không in đậm thì KHÔNG gán bold=true.
+     + Trong block heading hoặc ô bảng is_header=true: hệ thống KHÔNG tự động tô đậm. Chỉ segment nào thực sự in đậm trên PDF mới đặt bold=true; segment nét thường hoặc chỉ in nghiêng phải để bold=false.
 3. CĂN LỀ, THỤT ĐẦU DÒNG & BỐ CỤC NHIỀU CỘT:
    - Nhận diện đúng alignment ('left', 'center', 'right', 'justify') cho từng khối và từng ô bảng.
    - Ghi nhận first_line_indent_pt (số dương nếu thụt đầu dòng đoạn văn, số âm như -24 nếu thụt lề treo như "Câu 1. ..."), indent_left_pt nếu cả khối thụt vào so với lề trái chung, và line_spacing (ví dụ 1.15, 1.3).
@@ -193,7 +206,7 @@ Quy tắc bắt buộc:
 5. HÌNH VẼ MINH HỌA:
    - Với mọi hình học không gian/phẳng, đồ thị hàm số, biểu đồ hoặc ảnh chụp nhúng trong trang, xuất block_type="figure", alignment đúng vị trí ('left'/'center'/'right') và box_2d=[ymin, xmin, ymax, xmax] ôm trọn cả nhãn đỉnh (A, B, C, S, O, x, y...) để không bị cắt mất ký hiệu.
 6. Giữ nguyên ngôn ngữ gốc, chính tả, dấu câu và không tự ý thêm nội dung không có trên trang.
-7. TỐI ƯU TỐC ĐỘ JSON: Chỉ xuất các trường tùy chọn (bold, italic, underline, font_size_pt, color, tab_before, heading_level, indent_left_pt, first_line_indent_pt, tab_stops_pt, table_borderless, is_choice_block, alignment/width_pct/col_span của ô, caption) khi có giá trị thực sự cần thiết (true hoặc khác null/0). BỎ QUA không ghi các thuộc tính giá trị false hoặc null.`;
+7. TỐI ƯU TỐC ĐỘ JSON: Chỉ xuất các trường tùy chọn (bold, italic, underline, font_size_pt, color, tab_before, heading_level, indent_left_pt, first_line_indent_pt, tab_stops_pt, table_borderless, is_choice_block, alignment/width_pct/col_span của ô, caption) khi có giá trị thực sự là true hoặc khác null/0. TUYỆT ĐỐI KHÔNG gộp segment khiến chữ thường bị gán nhầm bold=true.`;
 
 const OCR_MODELS_FAST = ['gemini-3.1-flash-lite', 'gemini-4-hydrogen'] as const;
 const OCR_MODELS_ACCURATE = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'] as const;
@@ -251,8 +264,7 @@ async function generateOcrWithModelFallback(
     const maxRetries = 2;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        const thinkingLevel =
-          model === 'gemini-3.1-flash-lite' ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW;
+        const thinkingLevel = ThinkingLevel.LOW;
         return await ai.models.generateContent({
           model,
           contents: {
@@ -264,7 +276,7 @@ async function generateOcrWithModelFallback(
                 },
               },
               {
-                text: `Hãy trích xuất toàn bộ nội dung trang ${pageNumber} theo đúng schema JSON, tách chuẩn công thức LaTeX và tọa độ hình vẽ.`,
+                text: `Hãy trích xuất toàn bộ nội dung trang ${pageNumber} theo đúng schema JSON, tách chuẩn công thức LaTeX, tọa độ hình vẽ và giữ chính xác tuyệt đối định dạng in đậm/in nghiêng/chữ thường theo bản PDF gốc (chỗ nào không in đậm tuyệt đối không đánh dấu bold=true).`,
               },
             ],
           },

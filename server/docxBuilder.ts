@@ -357,7 +357,7 @@ function renderTableXml(
         const cellAlign: BlockAlignment = cell.alignment ?? (isHeader ? 'center' : 'left');
         const segXml = renderSegmentsXml(cell.segments, {
           sizeHalfPt: defaultSizeHalfPt,
-          defaultBold: isHeader,
+          defaultBold: false,
           mathFormat,
         });
         const cellPara = renderParagraphXml(segXml, {
@@ -459,7 +459,7 @@ function renderSingleBlockXml(
     const sizeHalfPt = getBlockSizeHalfPt(blk);
     const inner = renderSegmentsXml(blk.segments, {
       sizeHalfPt,
-      defaultBold: true,
+      defaultBold: false,
       mathFormat,
     });
     return renderParagraphXml(inner, {
