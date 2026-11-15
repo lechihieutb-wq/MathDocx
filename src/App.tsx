@@ -63,6 +63,67 @@ async function parseJsonResponseSafe<T>(res: Response): Promise<T> {
   }
 }
 
+async function fetchWithRetry(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  maxRetries = 2
+): Promise<Response> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(input, init);
+      const isTransientStatus =
+        res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504;
+      if (isTransientStatus && attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        continue;
+      }
+      return res;
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        continue;
+      }
+    }
+  }
+  const rawMsg = lastError instanceof Error ? lastError.message : String(lastError || '');
+  if (/failed to fetch|networkerror|load failed/i.test(rawMsg)) {
+    throw new Error(
+      'Kết nối tới máy chủ xử lý bị gián đoạn (Failed to fetch). Vui lòng thử lại hoặc chọn độ phân giải 200 DPI.'
+    );
+  }
+  throw lastError instanceof Error ? lastError : new Error(rawMsg || 'Lỗi kết nối máy chủ.');
+}
+
+async function downscalePngDataUrl(dataUrl: string, scale: number): Promise<string> {
+  if (!dataUrl.startsWith('data:image/')) return dataUrl;
+  return await new Promise<string>((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const w = Math.max(24, Math.round(img.naturalWidth * scale));
+      const h = Math.max(24, Math.round(img.naturalHeight * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve(dataUrl);
+        return;
+      }
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      const out = canvas.toDataURL('image/png');
+      canvas.width = 0;
+      canvas.height = 0;
+      resolve(out.length < dataUrl.length ? out : dataUrl);
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
 export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -247,17 +308,54 @@ export default function App() {
         }))
       );
 
-      const exportRes = await fetch('/api/export/docx', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          pages: preparedPages,
-          filename,
-          addPageBreaks: pageBreaks,
-          choiceLayout: layout,
-          mathFormat: format,
-        }),
+      let exportPayload = JSON.stringify({
+        pages: preparedPages,
+        filename,
+        addPageBreaks: pageBreaks,
+        choiceLayout: layout,
+        mathFormat: format,
       });
+
+      if (exportPayload.length > 3_600_000) {
+        for (const scale of [0.68, 0.5]) {
+          const compactPages: PageExtraction[] = await Promise.all(
+            preparedPages.map(async (page) => ({
+              ...page,
+              blocks: await Promise.all(
+                page.blocks.map(async (blk) => {
+                  if (
+                    blk.block_type === 'figure' &&
+                    blk.croppedImageDataUrl &&
+                    blk.croppedImageDataUrl.length > 180_000
+                  ) {
+                    const smaller = await downscalePngDataUrl(blk.croppedImageDataUrl, scale);
+                    return { ...blk, croppedImageDataUrl: smaller };
+                  }
+                  return blk;
+                })
+              ),
+            }))
+          );
+          exportPayload = JSON.stringify({
+            pages: compactPages,
+            filename,
+            addPageBreaks: pageBreaks,
+            choiceLayout: layout,
+            mathFormat: format,
+          });
+          if (exportPayload.length <= 3_600_000) break;
+        }
+      }
+
+      const exportRes = await fetchWithRetry(
+        '/api/export/docx',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: exportPayload,
+        },
+        2
+      );
 
       if (!exportRes.ok) {
         const errData = await parseJsonResponseSafe<{ error?: string }>(exportRes);
@@ -315,11 +413,15 @@ export default function App() {
 
         const ommlPreviewPromise =
           eqQueries.length > 0
-            ? fetch('/api/omml/preview', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ equations: eqQueries }),
-              })
+            ? fetchWithRetry(
+                '/api/omml/preview',
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ equations: eqQueries }),
+                },
+                1
+              )
                 .then(async (ommlRes) => {
                   if (!ommlRes.ok || reqId !== syncRequestIdRef.current) return;
                   const ommlJson = (await ommlRes.json()) as {
@@ -434,11 +536,15 @@ export default function App() {
 
       const ommlPreviewPromise =
         eqQueries.length > 0
-          ? fetch('/api/omml/preview', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ equations: eqQueries }),
-            })
+          ? fetchWithRetry(
+              '/api/omml/preview',
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ equations: eqQueries }),
+              },
+              1
+            )
               .then(async (ommlRes) => {
                 if (!ommlRes.ok) return;
                 const ommlJson = (await ommlRes.json()) as {
@@ -558,14 +664,18 @@ export default function App() {
 
       const processSinglePage = async (idx: number) => {
         const page = renderedPages[idx];
-        const ocrRes = await fetch('/api/ocr/page', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            imageDataUrl: page.ocrDataUrl || page.dataUrl,
-            pageNumber: page.pageNumber,
-          }),
-        });
+        const ocrRes = await fetchWithRetry(
+          '/api/ocr/page',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              imageDataUrl: page.ocrDataUrl || page.dataUrl,
+              pageNumber: page.pageNumber,
+            }),
+          },
+          2
+        );
 
         const ocrJson = await parseJsonResponseSafe<{
           blocks?: PageExtraction['blocks'];
@@ -611,7 +721,7 @@ export default function App() {
         setStatusMessage(`Đã nhận dạng xong ${completedCount}/${total} trang...`);
       };
 
-      const concurrency = Math.min(3, total);
+      const concurrency = Math.min(2, total);
       const workers = Array.from({ length: concurrency }, async () => {
         while (!abortedError) {
           const idx = nextIndex++;
@@ -680,11 +790,15 @@ export default function App() {
 
       const ommlPreviewPromise =
         eqQueries.length > 0
-          ? fetch('/api/omml/preview', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ equations: eqQueries }),
-            })
+          ? fetchWithRetry(
+              '/api/omml/preview',
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ equations: eqQueries }),
+              },
+              1
+            )
               .then(async (ommlRes) => {
                 if (!ommlRes.ok) return;
                 const ommlJson = (await ommlRes.json()) as {
@@ -710,7 +824,7 @@ export default function App() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Đã xảy ra lỗi khi chuyển đổi.';
       setErrorMessage(msg);
-      setStatusMessage('');
+      setStatusMessage('Chuyển đổi bị gián đoạn');
     } finally {
       setIsConverting(false);
     }

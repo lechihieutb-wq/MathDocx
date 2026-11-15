@@ -255,7 +255,7 @@ async function generateOcrWithModelFallback(
   let lastError: unknown;
 
   for (const model of modelsToTry) {
-    const maxRetries = 2;
+    const maxRetries = 1;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         const thinkingLevel = ThinkingLevel.LOW;
@@ -291,14 +291,14 @@ async function generateOcrWithModelFallback(
             break;
           }
           if (attempt < maxRetries) {
-            await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+            await new Promise((r) => setTimeout(r, 600));
             continue;
           }
           break;
         }
 
         if (isTransientServerError(err, msg) && attempt < maxRetries) {
-          await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+          await new Promise((r) => setTimeout(r, 500));
           continue;
         }
 
