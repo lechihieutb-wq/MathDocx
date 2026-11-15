@@ -4,9 +4,9 @@ import type {
   InlineSegment,
   PageExtraction,
   TableCellData,
-} from '../types/document';
-import { splitTextPreservingInlineMath } from './latexParser';
-import { cleanLatexDelimiters } from './layoutMetrics';
+} from '../types/document.ts';
+import { splitTextPreservingInlineMath } from './latexParser.ts';
+import { cleanLatexDelimiters } from './layoutMetrics.ts';
 
 const LEADING_LABEL_REGEX =
   /^(Câu\s+\d+\s*[\.:]?|Bài\s+\d+\s*[\.:]?|Ví dụ\s+\d+\s*[\.:]?|Phần\s+[IVXLC\d]+\s*[\.:]?|Chương\s+\d+\s*[\.:]?|[A-Da-d][\.\):])(?:\s+|$)/i;

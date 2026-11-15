@@ -4,8 +4,8 @@ import type {
   InlineSegment,
   PageExtraction,
   TableCellData,
-} from '../types/document';
-import { renderLatexPictureToSvgDataUrl } from './tikzRenderer';
+} from '../types/document.ts';
+import { renderLatexPictureToSvgDataUrl } from './tikzRenderer.ts';
 
 export type LatexPasteMode = 'auto' | 'bare_latex';
 

@@ -4,7 +4,7 @@ import type {
   InlineSegment,
   PageExtraction,
   TableCellData,
-} from '../types/document';
+} from '../types/document.ts';
 
 export interface PageGeometry {
   pageWidthPt: number;
