@@ -45,6 +45,24 @@ interface CroppedFigureItem {
   caption?: string | null;
 }
 
+async function parseJsonResponseSafe<T>(res: Response): Promise<T> {
+  const raw = await res.text();
+  try {
+    return (raw ? JSON.parse(raw) : {}) as T;
+  } catch {
+    if (res.status === 413) {
+      throw new Error('Dung lượng dữ liệu gửi lên vượt quá giới hạn máy chủ (HTTP 413).');
+    }
+    if (res.status === 504) {
+      throw new Error('Máy chủ xử lý quá thời gian cho phép (HTTP 504). Vui lòng thử lại.');
+    }
+    const snippet = raw.replace(/\s+/g, ' ').trim().slice(0, 120);
+    throw new Error(
+      `Máy chủ trả về phản hồi không hợp lệ (HTTP ${res.status})${snippet ? `: ${snippet}` : ''}`
+    );
+  }
+}
+
 export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -242,7 +260,7 @@ export default function App() {
       });
 
       if (!exportRes.ok) {
-        const errData = await exportRes.json().catch(() => ({}));
+        const errData = await parseJsonResponseSafe<{ error?: string }>(exportRes);
         throw new Error(errData.error || 'Không thể tạo tệp Word.');
       }
 
@@ -549,7 +567,10 @@ export default function App() {
           }),
         });
 
-        const ocrJson = await ocrRes.json();
+        const ocrJson = await parseJsonResponseSafe<{
+          blocks?: PageExtraction['blocks'];
+          error?: string;
+        }>(ocrRes);
         if (!ocrRes.ok) {
           throw new Error(ocrJson.error || `Lỗi OCR trang ${page.pageNumber}`);
         }
@@ -558,31 +579,22 @@ export default function App() {
 
         if (autoCropFigures) {
           const figureBlocks = blocks.filter(
-            (blk: { block_type?: string; box_2d?: unknown }) =>
+            (blk): blk is DocumentBlock & { box_2d: number[] } =>
               blk.block_type === 'figure' && Array.isArray(blk.box_2d)
           );
           if (figureBlocks.length > 0) {
             const croppedList = await cropFiguresFromPage(
               page,
-              figureBlocks.map((b: { box_2d: number[] }) => b.box_2d)
+              figureBlocks.map((b) => b.box_2d)
             );
-            figureBlocks.forEach(
-              (
-                blk: {
-                  croppedImageDataUrl?: string;
-                  croppedWidthPx?: number;
-                  croppedHeightPx?: number;
-                },
-                fIdx: number
-              ) => {
-                const cropped = croppedList[fIdx];
-                if (cropped) {
-                  blk.croppedImageDataUrl = cropped.dataUrl;
-                  blk.croppedWidthPx = cropped.width;
-                  blk.croppedHeightPx = cropped.height;
-                }
+            figureBlocks.forEach((blk, fIdx) => {
+              const cropped = croppedList[fIdx];
+              if (cropped) {
+                blk.croppedImageDataUrl = cropped.dataUrl;
+                blk.croppedWidthPx = cropped.width;
+                blk.croppedHeightPx = cropped.height;
               }
-            );
+            });
           }
         }
 
