@@ -550,12 +550,23 @@ function renderSingleBlockXml(
     const heightPx = Math.max(40, blk.croppedHeightPx ?? 400);
     const box = isValidBox(blk.box_2d) ? blk.box_2d : null;
     const maxAvailWidthIn = Math.max(1.2, availableWidthTwips / 1440);
+    const maxAvailHeightIn = Math.max(
+      2.0,
+      ((geom.pageHeightPt - geom.marginTopPt - geom.marginBottomPt) / 72) * 0.78
+    );
     const rawBoxWidthIn = box
       ? ((box[3] - box[1]) / 1000) * (geom.pageWidthPt / 72)
+      : blk.croppedWidthPx
+      ? Math.max(1.5, Math.min(maxAvailWidthIn * 0.94, widthPx / 96))
       : maxAvailWidthIn * 0.6;
-    const targetWidthIn = Math.max(0.8, Math.min(maxAvailWidthIn * 0.96, rawBoxWidthIn));
+    let targetWidthIn = Math.max(0.8, Math.min(maxAvailWidthIn * 0.96, rawBoxWidthIn));
+    let targetHeightIn = targetWidthIn * (heightPx / widthPx);
+    if (targetHeightIn > maxAvailHeightIn) {
+      targetHeightIn = maxAvailHeightIn;
+      targetWidthIn = Math.max(0.4, targetHeightIn * (widthPx / heightPx));
+    }
     const cxEmu = Math.round(targetWidthIn * 914400);
-    const cyEmu = Math.round(cxEmu * (heightPx / widthPx));
+    const cyEmu = Math.round(targetHeightIn * 914400);
 
     const figAlign = blk.alignment ?? 'center';
     const picRun = renderPictureRunXml(relId, imgIndex, cxEmu, cyEmu, filename);
