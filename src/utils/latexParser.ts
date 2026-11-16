@@ -3970,9 +3970,294 @@ export function splitTextPreservingInlineMath(
   return out.length > 0 ? out : [{ type: 'text', content: text, ...baseStyle }];
 }
 
-function normalizeSegmentListInlineMath(segments?: InlineSegment[] | null): InlineSegment[] | undefined {
+function findProtectedSpansForMathPromotion(
+  text: string,
+  opts: { prevTextTail?: string; isLineStartAtZero?: boolean }
+): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  const addMatchSpans = (re: RegExp, groupIdx = 0) => {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const target = groupIdx > 0 && m[groupIdx] !== undefined ? m[groupIdx] : m[0];
+      if (!target) {
+        if (m[0].length === 0) re.lastIndex++;
+        continue;
+      }
+      const start =
+        groupIdx > 0 && m[groupIdx] !== undefined ? m.index + m[0].indexOf(target) : m.index;
+      const end = start + target.length;
+      if (end > start) spans.push([start, end]);
+    }
+  };
+
+  // URLs and emails
+  addMatchSpans(/https?:\/\/\S+|www\.\S+|\b[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}\b/gi);
+  // Dates like 15/11/2026 or 15-11-2026
+  addMatchSpans(/(?<![\p{L}\p{N}])\d{1,2}[/-]\d{1,2}[/-]\d{2,4}(?![\p{L}\p{N}])/gu);
+  // Structural Vietnamese labels + number (Câu 1, Bài 2, Hình 1, Bảng 2, Phần 1, Chương 1, Trang 1, Mã đề 101...)
+  addMatchSpans(
+    /(?<![\p{L}\p{N}_])(?:Câu|Bài|Ví\s+dụ|VD|Hình|Bảng|Biểu\s+đồ|Đồ\s+thị|Chương|Phần|Mục|Trang|Tiết|Tuần|Bước|Đề\s+số|Đề|Mã\s+đề|Phiếu|Tờ)\s+\d+(?:[.,]\d+)?(?![\p{L}\p{N}_])/giu
+  );
+  // Cross-segment structural label split across bold/regular boundary (e.g. "Câu " + "1.")
+  if (
+    opts.prevTextTail &&
+    /(?:Câu|Bài|Ví\s+dụ|VD|Hình|Bảng|Biểu\s+đồ|Đồ\s+thị|Chương|Phần|Mục|Trang|Tiết|Tuần|Bước|Đề\s+số|Đề|Mã\s+đề|Phiếu|Tờ)\s+$/iu.test(
+      opts.prevTextTail
+    )
+  ) {
+    const leadNumM = text.match(/^\s*\d+(?:[.,]\d+)?(?![\p{L}\p{N}_])/u);
+    if (leadNumM) {
+      spans.push([0, leadNumM[0].length]);
+    }
+  }
+  // Leading numbered list markers at line start ("1. Tìm x", "2) Giải...")
+  if (opts.isLineStartAtZero) {
+    const m0 = text.match(/^[ \t]*\d+(?:\.\d+)*[\.\)](?=\s|$)/);
+    if (m0) spans.push([0, m0[0].length]);
+  }
+  addMatchSpans(/\n([ \t]*\d+(?:\.\d+)*[\.\)])(?=\s|$)/g, 1);
+  // Leading bullet dashes at line start ("- Cho hàm số...", not "-5" or "- 5")
+  if (opts.isLineStartAtZero) {
+    const b0 = text.match(/^[ \t]*-(?=[ \t]+(?!\d|[+-−]|\\|∞)[^\s])/);
+    if (b0) spans.push([0, b0[0].length]);
+  }
+  addMatchSpans(/\n([ \t]*-)(?=[ \t]+(?!\d|[+-−]|\\|∞)[^\s])/g, 1);
+  // Hyphenated compound words (e-learning, a-xít, COVID-19, ti-vi)
+  addMatchSpans(/[\p{L}]{2,}-[\p{L}\p{N}]+|[\p{L}\p{N}]+-[\p{L}]{2,}/gu);
+  // Year range dash (2024 - 2025): protect only the dash between years
+  addMatchSpans(/(?:19|20)\d{2}\s*([-–])\s*(?:19|20)\d{2}/g, 1);
+  // C++ / ++ tokens
+  addMatchSpans(/\+\++/g);
+
+  if (spans.length <= 1) return spans;
+  spans.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const merged: Array<[number, number]> = [spans[0]];
+  for (let i = 1; i < spans.length; i++) {
+    const prev = merged[merged.length - 1];
+    const curr = spans[i];
+    if (curr[0] <= prev[1]) {
+      if (curr[1] > prev[1]) prev[1] = curr[1];
+    } else {
+      merged.push(curr);
+    }
+  }
+  return merged;
+}
+
+function isContextualMinusSign(
+  text: string,
+  pos: number,
+  opts: {
+    prevSegType?: 'text' | 'math';
+    nextSegType?: 'text' | 'math';
+    prevTextTail?: string;
+    isTableCell?: boolean;
+  }
+): boolean {
+  if (opts.isTableCell && text.trim() === '-') return true;
+  if (opts.prevSegType === 'math' && opts.nextSegType === 'math' && /^[\s-]*$/.test(text)) {
+    return true;
+  }
+  if (text.trim() === '-' && (opts.prevSegType === 'math' || opts.nextSegType === 'math')) {
+    return true;
+  }
+
+  const before = (opts.prevTextTail ?? '') + text.slice(0, pos);
+  const after = text.slice(pos + 1);
+
+  // Explicit Vietnamese / math cue words immediately before '-'
+  if (
+    /(?:dấu|dấu\s+hiệu|mang|cộng|trừ|phép|ký\s+hiệu|kí\s+hiệu|đổi\s+dấu|đổi|sang|thành|chiều|hệ\s+số)\s*$/iu.test(
+      before
+    )
+  ) {
+    return true;
+  }
+  // Conjunctions ("từ", "về", "nhận", "là", "bằng", "và", "hay", "hoặc") when '-' ends clause or pairs with +/-
+  if (
+    /(?:từ|về|nhận|là|bằng|và|hay|hoặc)\s*$/iu.test(before) &&
+    (/^[\s.,;:)\]?!]*$/.test(after) ||
+      /^\s*(?:đến|sang|thành|tới|và|hoặc|hay|[\+,;.)\]/])/iu.test(after))
+  ) {
+    return true;
+  }
+  // Delimiter-wrapped or paired signs: (-), [-], +/-, -/+, +, -, :-, =-
+  if (
+    /(?:[([{/,;:=]|\+)\s*$/.test(before) &&
+    /^\s*(?:[)\]},;.:/+]|$)/.test(after)
+  ) {
+    return true;
+  }
+  // Trailing '-' in a sentence that already references '+' or math
+  if (/\+\s*(?:và|hay|hoặc|với|,)\s*$/iu.test(before) && /^[\s.,;:)\]?!]*$/.test(after)) {
+    return true;
+  }
+
+  return false;
+}
+
+function promoteSegmentNumbersAndSigns(
+  seg: InlineSegment,
+  opts: {
+    prevSegType?: 'text' | 'math';
+    nextSegType?: 'text' | 'math';
+    prevTextTail?: string;
+    isTableCell?: boolean;
+    isLineStartAtZero?: boolean;
+  }
+): InlineSegment[] {
+  if (seg.type !== 'text' || !seg.content) return [seg];
+  const text = seg.content;
+  const { type: _t, content: _c, tab_before, ...style } = seg;
+
+  const protectedSpans = findProtectedSpansForMathPromotion(text, opts);
+  const out: InlineSegment[] = [];
+  let textBuf = '';
+
+  const flushText = () => {
+    if (!textBuf) return;
+    out.push({ type: 'text', content: textBuf, ...style });
+    textBuf = '';
+  };
+
+  const pushMath = (latex: string) => {
+    const cleaned = latex.replace(/−/g, '-').trim();
+    if (!cleaned) return;
+    out.push({
+      type: 'math',
+      content: cleaned,
+      ...(style.bold ? { bold: true } : {}),
+      ...(style.italic ? { italic: true } : {}),
+      ...(style.font_size_pt ? { font_size_pt: style.font_size_pt } : {}),
+      ...(style.color ? { color: style.color } : {}),
+    });
+  };
+
+  let spanIdx = 0;
+  let pos = 0;
+
+  while (pos < text.length) {
+    while (spanIdx < protectedSpans.length && protectedSpans[spanIdx][1] <= pos) {
+      spanIdx++;
+    }
+    if (
+      spanIdx < protectedSpans.length &&
+      pos >= protectedSpans[spanIdx][0] &&
+      pos < protectedSpans[spanIdx][1]
+    ) {
+      textBuf += text.slice(pos, protectedSpans[spanIdx][1]);
+      pos = protectedSpans[spanIdx][1];
+      continue;
+    }
+
+    const nextSpanStart =
+      spanIdx < protectedSpans.length ? protectedSpans[spanIdx][0] : text.length;
+    const chunk = text.slice(pos, nextSpanStart);
+    const prevChar = pos > 0 ? text[pos - 1] : '';
+
+    // 1. Optional sign + infinity symbol (e.g. -∞, +∞, ∞)
+    const infMatch = chunk.match(/^([+-−]\s*)?∞(?![\p{L}\p{N}_])/u);
+    if (infMatch && !/[\p{L}\p{N}_]/u.test(prevChar)) {
+      flushText();
+      const signPart = infMatch[1] ? infMatch[1].replace(/\s+/g, '').replace(/−/g, '-') : '';
+      pushMath(`${signPart}\\infty`);
+      pos += infMatch[0].length;
+      continue;
+    }
+
+    // 2. Number, signed number (+3, -5, -2,5), or arithmetic chain of numbers (2 + 3 - 1)
+    if (!/[\p{L}\p{N}_]/u.test(prevChar)) {
+      const numMatch = chunk.match(
+        /^(?:[+-−](?=\d))?\d+(?:[.,]\d+)?(?![\p{L}\p{N}_])(?:\s*[+-−]\s*\d+(?:[.,]\d+)?(?![\p{L}\p{N}_]))*/u
+      );
+      if (numMatch) {
+        flushText();
+        pushMath(numMatch[0]);
+        pos += numMatch[0].length;
+        continue;
+      }
+    }
+
+    // 3. Standalone '+' or Unicode minus '−'
+    if (text[pos] === '+' || text[pos] === '−') {
+      flushText();
+      pushMath(text[pos] === '−' ? '-' : '+');
+      pos += 1;
+      continue;
+    }
+
+    // 4. Contextual ASCII '-' minus sign
+    if (
+      text[pos] === '-' &&
+      isContextualMinusSign(text, pos, {
+        prevSegType: opts.prevSegType,
+        nextSegType: opts.nextSegType,
+        prevTextTail: opts.prevTextTail,
+        isTableCell: opts.isTableCell,
+      })
+    ) {
+      flushText();
+      pushMath('-');
+      pos += 1;
+      continue;
+    }
+
+    textBuf += text[pos];
+    pos += 1;
+  }
+
+  flushText();
+
+  if (out.length === 0) return [seg];
+  if (tab_before) {
+    out[0] = { ...out[0], tab_before: true };
+  }
+  return out;
+}
+
+export function promoteNumbersAndSignsToMathSegments(
+  segments?: InlineSegment[] | null,
+  options: { isTableCell?: boolean } = {}
+): InlineSegment[] | undefined {
   if (!segments || segments.length === 0) return segments ?? undefined;
-  const result: InlineSegment[] = [];
+  const out: InlineSegment[] = [];
+  let prevTextTail = '';
+  let atBlockLineStart = true;
+
+  for (let idx = 0; idx < segments.length; idx++) {
+    const seg = segments[idx];
+    const prevSegType = idx > 0 ? segments[idx - 1]?.type : undefined;
+    const nextSegType = idx + 1 < segments.length ? segments[idx + 1]?.type : undefined;
+    const isLineStartAtZero = atBlockLineStart || Boolean(seg.tab_before);
+
+    if (seg.type === 'text' && seg.content) {
+      const promoted = promoteSegmentNumbersAndSigns(seg, {
+        prevSegType,
+        nextSegType,
+        prevTextTail,
+        isTableCell: options.isTableCell,
+        isLineStartAtZero,
+      });
+      out.push(...promoted);
+      prevTextTail = (prevTextTail + seg.content).slice(-32);
+      atBlockLineStart = seg.content.endsWith('\n');
+    } else {
+      out.push(seg);
+      prevTextTail = '';
+      atBlockLineStart = false;
+    }
+  }
+
+  return out;
+}
+
+export function normalizeSegmentListInlineMath(
+  segments?: InlineSegment[] | null,
+  options: { isTableCell?: boolean } = {}
+): InlineSegment[] | undefined {
+  if (!segments || segments.length === 0) return segments ?? undefined;
+  const splitResult: InlineSegment[] = [];
   for (const seg of segments) {
     if (
       seg.type !== 'text' ||
@@ -3981,7 +4266,7 @@ function normalizeSegmentListInlineMath(segments?: InlineSegment[] | null): Inli
         !seg.content.includes('\\(') &&
         !seg.content.includes('\\['))
     ) {
-      result.push(seg);
+      splitResult.push(seg);
       continue;
     }
     const { type: _t, content, tab_before, ...style } = seg;
@@ -3989,9 +4274,9 @@ function normalizeSegmentListInlineMath(segments?: InlineSegment[] | null): Inli
     if (tab_before && split.length > 0) {
       split[0] = { ...split[0], tab_before: true };
     }
-    result.push(...split);
+    splitResult.push(...split);
   }
-  return result;
+  return promoteNumbersAndSignsToMathSegments(splitResult, options);
 }
 
 export function normalizePagesInlineMath(pages: PageExtraction[]): PageExtraction[] {
@@ -4005,7 +4290,8 @@ export function normalizePagesInlineMath(pages: PageExtraction[]): PageExtractio
             table_rows: blk.table_rows.map((row) =>
               row.map((cell) => ({
                 ...cell,
-                segments: normalizeSegmentListInlineMath(cell.segments) ?? [],
+                segments:
+                  normalizeSegmentListInlineMath(cell.segments, { isTableCell: true }) ?? [],
               }))
             ),
           }
@@ -4060,10 +4346,12 @@ export function parsePastedLatexToPages(
 
   if (pageBlockGroups.length === 0) return [];
 
-  return pageBlockGroups.map((blocks, idx) => ({
+  const pages: PageExtraction[] = pageBlockGroups.map((blocks, idx) => ({
     pageNumber: idx + 1,
     pageWidthPx: 1240,
     pageHeightPx: 1754,
     blocks,
   }));
+
+  return normalizePagesInlineMath(pages);
 }

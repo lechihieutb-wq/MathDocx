@@ -157,7 +157,7 @@ function loadImageElement(src: string): Promise<HTMLImageElement | null> {
 export async function cropFiguresFromPage(
   page: RenderedPage,
   boxes: number[][],
-  padRatio = 0.012
+  padRatio = 0.014
 ): Promise<Array<{ dataUrl: string; width: number; height: number } | null>> {
   if (boxes.length === 0) return [];
   const img = await loadImageElement(page.dataUrl);
@@ -183,7 +183,7 @@ export async function cropFiguresFromPage(
     const cropH = bottom - top;
     if (cropW < 20 || cropH < 20) return null;
 
-    const maxCropDim = 1050;
+    const maxCropDim = 1200;
     const scaleDown =
       cropW > maxCropDim || cropH > maxCropDim
         ? Math.min(maxCropDim / cropW, maxCropDim / cropH)

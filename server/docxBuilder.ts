@@ -7,7 +7,7 @@ import type {
   MathOutputFormat,
   PageExtraction,
 } from '../src/types/document.ts';
-import { splitTextPreservingInlineMath } from '../src/utils/latexParser.ts';
+import { normalizeSegmentListInlineMath } from '../src/utils/latexParser.ts';
 import {
   computePageGeometry,
   groupBlocksIntoVisualBands,
@@ -85,33 +85,18 @@ function renderRunXml(
 
 function renderSegmentsXml(
   segments: InlineSegment[] | null | undefined,
-  options: { sizeHalfPt?: number; defaultBold?: boolean; mathFormat?: MathOutputFormat } = {}
+  options: {
+    sizeHalfPt?: number;
+    defaultBold?: boolean;
+    mathFormat?: MathOutputFormat;
+    isTableCell?: boolean;
+  } = {}
 ): string {
   if (!segments || segments.length === 0) return '';
-  const { sizeHalfPt = 24, defaultBold = false, mathFormat = 'omml' } = options;
+  const { sizeHalfPt = 24, defaultBold = false, mathFormat = 'omml', isTableCell = false } = options;
   const out: string[] = [];
 
-  const normalizedSegments: InlineSegment[] = [];
-  for (const seg of segments) {
-    if (
-      mathFormat === 'omml' &&
-      seg.type === 'text' &&
-      seg.content &&
-      (seg.content.includes('$') ||
-        seg.content.includes('＄') ||
-        seg.content.includes('\\(') ||
-        seg.content.includes('\\['))
-    ) {
-      const { type: _t, content, tab_before, ...style } = seg;
-      const split = splitTextPreservingInlineMath(content, style);
-      if (tab_before && split.length > 0) {
-        split[0] = { ...split[0], tab_before: true };
-      }
-      normalizedSegments.push(...split);
-    } else {
-      normalizedSegments.push(seg);
-    }
-  }
+  const normalizedSegments = normalizeSegmentListInlineMath(segments, { isTableCell }) ?? segments;
 
   for (const seg of normalizedSegments) {
     if (seg.tab_before) {
@@ -359,6 +344,7 @@ function renderTableXml(
           sizeHalfPt: defaultSizeHalfPt,
           defaultBold: false,
           mathFormat,
+          isTableCell: true,
         });
         const cellPara = renderParagraphXml(segXml, {
           align: cellAlign,

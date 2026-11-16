@@ -171,7 +171,7 @@ function RenderSegments({
                     fontSize: `${segFontPt * scale}px`,
                     color: hex ? `#${hex}` : undefined,
                   }}
-                  className="inline-flex items-center px-0.5 mx-0.5 align-baseline"
+                  className="inline-flex items-center px-[1px] align-baseline"
                 >
                   <MathRenderer latex={seg.content} displayMode={false} />
                 </span>
@@ -190,7 +190,7 @@ function RenderSegments({
                   fontSize: `${segFontPt * scale}px`,
                   color: hex ? `#${hex}` : undefined,
                 }}
-                className="inline-flex items-center px-0.5 mx-0.5 rounded hover:bg-blue-50 hover:ring-1 hover:ring-blue-300 transition-colors align-baseline cursor-pointer"
+                className="inline-flex items-center px-[1px] rounded hover:bg-blue-50 hover:ring-1 hover:ring-blue-300 transition-colors align-baseline cursor-pointer"
               >
                 <MathRenderer latex={seg.content} displayMode={false} />
               </button>
