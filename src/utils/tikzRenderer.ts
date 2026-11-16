@@ -30,6 +30,7 @@ interface DrawStyle {
   fontStyle?: string;
   align?: string;
   anchor?: string;
+  anchorDist?: number;
   pos?: number;
   shiftX?: number;
   shiftY?: number;
@@ -1137,6 +1138,10 @@ function parseOptionsString(
       key === 'below right'
     ) {
       style.anchor = key;
+      if (cleanVal) {
+        const dPx = parseLengthToPx(cleanVal, unitPx);
+        if (dPx !== null && Number.isFinite(dPx)) style.anchorDist = dPx;
+      }
     } else if (key === 'anchor' && cleanVal) {
       const anchorMap: Record<string, string> = {
         north: 'below',
@@ -1285,12 +1290,11 @@ function resolveCoordinateExpr(
   return null;
 }
 
-function getAnchorOffsets(anchor: string | undefined, w: number, h: number): {
+function getAnchorOffsets(anchor: string | undefined, w: number, h: number, pad = 7): {
   dx: number;
   dy: number;
   textAnchor: 'start' | 'middle' | 'end';
 } {
-  const pad = 7;
   switch (anchor) {
     case 'above':
       return { dx: 0, dy: -pad - 3, textAnchor: 'middle' };
@@ -2375,35 +2379,104 @@ function executeTikzStatements(
     rawContent: string,
     nStyle: ReturnType<typeof parseOptionsString>,
     anchorPt: Point2D,
-    toSvg: (pt: Point2D) => Point2D
+    toSvg: (pt: Point2D) => Point2D,
+    targetList: SvgItem[] = items
   ) => {
     const sp = toSvg(anchorPt);
-    const f = formatTikzLabelToSvg(rawContent, nStyle.fontSize ?? 13);
-    const off = getAnchorOffsets(nStyle.anchor, 14, 14);
+    const fs = nStyle.fontSize ?? 13;
+    const f = formatTikzLabelToSvg(rawContent, fs);
+    const anchorPad =
+      nStyle.anchorDist !== undefined ? 2 + nStyle.anchorDist + (nStyle.innerSep ?? 1.5) : 7;
+    const off = getAnchorOffsets(nStyle.anchor, fs, fs, anchorPad);
     const tx = sp.x + off.dx + (nStyle.shiftXPx ?? 0) + (nStyle.shiftX ?? 0) * unitPx;
     const ty = sp.y + off.dy + (nStyle.shiftYPx ?? 0) - (nStyle.shiftY ?? 0) * unitPx;
     const fw = nStyle.fontWeight ? ` font-weight="${nStyle.fontWeight}"` : '';
-    const halfW = Math.max(8, f.plainLength * 4.5);
-    items.push({
+    const textW = Math.max(8, f.plainLength * fs * 0.56);
+    const minTextX =
+      off.textAnchor === 'middle'
+        ? tx - textW / 2
+        : off.textAnchor === 'end'
+        ? tx - textW
+        : tx;
+    const maxTextX = minTextX + textW;
+    const minTextY = ty - fs * 0.85;
+    const maxTextY = ty + fs * 0.25;
+
+    if (nStyle.fill && nStyle.fill !== 'none') {
+      const boxPad = nStyle.innerSep ?? 2;
+      const rx = minTextX - boxPad;
+      const ry = minTextY - boxPad;
+      const rw = textW + boxPad * 2;
+      const rh = maxTextY - minTextY + boxPad * 2;
+      const rxAttr = nStyle.roundedCorners ? ` rx="${nStyle.roundedCorners.toFixed(1)}"` : '';
+      targetList.push({
+        kind: 'rect',
+        svg: `<rect x="${rx.toFixed(1)}" y="${ry.toFixed(1)}" width="${rw.toFixed(1)}" height="${rh.toFixed(1)}" fill="${nStyle.fill}" stroke="none"${rxAttr}/>`,
+        bounds: { minX: rx, minY: ry, maxX: rx + rw, maxY: ry + rh },
+      });
+    }
+
+    targetList.push({
       kind: 'text',
-      svg: `<text x="${tx.toFixed(1)}" y="${ty.toFixed(1)}" font-size="${nStyle.fontSize ?? 13}" font-family="Times New Roman, serif"${fw} text-anchor="${off.textAnchor}" fill="${nStyle.stroke}">${f.tspans}</text>`,
+      svg: `<text x="${tx.toFixed(1)}" y="${ty.toFixed(1)}" font-size="${fs}" font-family="Times New Roman, serif"${fw} text-anchor="${off.textAnchor}" fill="${nStyle.stroke}">${f.tspans}</text>`,
       bounds: {
-        minX:
-          off.textAnchor === 'middle'
-            ? tx - halfW
-            : off.textAnchor === 'end'
-            ? tx - halfW * 2
-            : tx,
-        minY: ty - 14,
-        maxX:
-          off.textAnchor === 'middle'
-            ? tx + halfW
-            : off.textAnchor === 'start'
-            ? tx + halfW * 2
-            : tx,
-        maxY: ty + 5,
+        minX: minTextX,
+        minY: minTextY - 1,
+        maxX: maxTextX,
+        maxY: maxTextY + 1,
       },
     });
+  };
+
+  // Parse flexible TikZ node header: any order of [opts], (name), at (coord) before {text}
+  const parseNodeHeader = (
+    str: string,
+    afterKeywordIdx: number
+  ): { opts: string; name?: string; atCoord?: string; text: string; endIdx: number } | null => {
+    let p = afterKeywordIdx;
+    const optParts: string[] = [];
+    let name: string | undefined;
+    let atCoord: string | undefined;
+    while (p < str.length) {
+      while (p < str.length && /\s/.test(str[p])) p++;
+      if (str[p] === '[') {
+        const brk = readBalanced(str, p, '[', ']');
+        if (!brk) return null;
+        optParts.push(brk.content);
+        p = brk.endIdx + 1;
+        continue;
+      }
+      if (str.startsWith('at', p) && !/[a-zA-Z0-9_]/.test(str[p + 2] || '')) {
+        let q = p + 2;
+        while (q < str.length && /\s/.test(str[q])) q++;
+        if (str[q] === '(') {
+          const par = readBalanced(str, q, '(', ')');
+          if (!par) return null;
+          atCoord = par.content;
+          p = par.endIdx + 1;
+          continue;
+        }
+      }
+      if (str[p] === '(') {
+        const par = readBalanced(str, p, '(', ')');
+        if (!par) return null;
+        name = par.content.trim();
+        p = par.endIdx + 1;
+        continue;
+      }
+      break;
+    }
+    while (p < str.length && /\s/.test(str[p])) p++;
+    if (str[p] !== '{') return null;
+    const textBr = readBalanced(str, p, '{', '}');
+    if (!textBr) return null;
+    return {
+      opts: optParts.join(', '),
+      name,
+      atCoord,
+      text: textBr.content,
+      endIdx: textBr.endIdx,
+    };
   };
 
   // Sequential source-order execution over blocks (axis, scope, {...}), loops (\foreach),
@@ -2715,21 +2788,18 @@ function executeTikzStatements(
       continue;
     }
 
-    // \node[opts] (name)? at (x,y) {text}
-    const nodeM = stmt.match(
-      /^\\node(?:\s*\[([^\]]*)\])?\s*(?:\(([^)]+)\))?\s*(?:at\s*\(([^)]+)\))?\s*\{/
-    );
-    if (nodeM) {
-      const braceIdx = stmt.indexOf('{', nodeM[0].length - 1);
-      const br = readBalanced(stmt, braceIdx, '{', '}');
-      if (br) {
-        const pt = nodeM[3]
-          ? resolveCoordinateExpr(nodeM[3], namedCoords, { x: 0, y: 0 }, false, scope.vars, scope.customFuncs)
+    // \node[opts] (name)? at (x,y) {text} (supports options/at/name in any order)
+    if (/^\\node(?![a-zA-Z])/.test(stmt)) {
+      const parsedNode = parseNodeHeader(stmt, 5);
+      if (parsedNode) {
+        const pt = parsedNode.atCoord
+          ? resolveCoordinateExpr(parsedNode.atCoord, namedCoords, { x: 0, y: 0 }, false, scope.vars, scope.customFuncs)
           : { x: 0, y: 0 };
         if (pt) {
-          if (nodeM[2]) namedCoords[nodeM[2].trim()] = pt;
-          const st = parseOptionsString(nodeM[1] || '', scope, customColors, unitPx, scope.vars, scope.customFuncs);
-          emitNodeItem(br.content, st, pt, toSvgPt);
+          if (parsedNode.name) namedCoords[parsedNode.name] = pt;
+          const nodeBase: TikzScopeState = { ...scope, fill: 'none' };
+          const st = parseOptionsString(parsedNode.opts, nodeBase, customColors, unitPx, scope.vars, scope.customFuncs);
+          emitNodeItem(parsedNode.text, st, pt, toSvgPt);
         }
       }
       continue;
@@ -2774,6 +2844,8 @@ function executeTikzStatements(
     let startPt: Point2D = { x: 0, y: 0 };
     let hasSubpath = false;
     const dCmds: string[] = [];
+    const deferredNodeItems: SvgItem[] = [];
+    const nodeBaseScope: TikzScopeState = { ...drawScope, fill: 'none' };
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
@@ -2841,14 +2913,11 @@ function executeTikzStatements(
 
         // Support inline `node[opts]{text}` placed between `--` and `(nextPt)`
         const pendingMidNodes: Array<{ opts: string; text: string }> = [];
-        while (pathStr.startsWith('node', idx)) {
-          const nm = pathStr.slice(idx).match(/^node(?:\s*\[([^\]]*)\])?\s*(?:\([^)]+\))?\s*\{/);
-          if (!nm) break;
-          const bIdx = idx + nm[0].length - 1;
-          const br = readBalanced(pathStr, bIdx, '{', '}');
-          if (!br) break;
-          pendingMidNodes.push({ opts: nm[1] || '', text: br.content });
-          idx = br.endIdx + 1;
+        while (pathStr.startsWith('node', idx) && !/[a-zA-Z]/.test(pathStr[idx + 4] || '')) {
+          const parsedMid = parseNodeHeader(pathStr, idx + 4);
+          if (!parsedMid) break;
+          pendingMidNodes.push({ opts: parsedMid.opts, text: parsedMid.text });
+          idx = parsedMid.endIdx + 1;
           while (idx < pathStr.length && /\s/.test(pathStr[idx])) idx++;
         }
 
@@ -2856,7 +2925,7 @@ function executeTikzStatements(
           idx += 5;
           dCmds.push('Z');
           for (const pn of pendingMidNodes) {
-            const nStyle = parseOptionsString(pn.opts, drawScope, customColors, unitPx, scope.vars, scope.customFuncs);
+            const nStyle = parseOptionsString(pn.opts, nodeBaseScope, customColors, unitPx, scope.vars, scope.customFuncs);
             const tPos = nStyle.pos ?? 0.5;
             emitNodeItem(
               pn.text,
@@ -2865,7 +2934,8 @@ function executeTikzStatements(
                 x: curPt.x + (startPt.x - curPt.x) * tPos,
                 y: curPt.y + (startPt.y - curPt.y) * tPos,
               },
-              localToSvgPt
+              localToSvgPt,
+              deferredNodeItems
             );
           }
           curPt = startPt;
@@ -2905,7 +2975,7 @@ function executeTikzStatements(
             lastSegFrom = curPt;
             lastSegTo = nextPt;
             for (const pn of pendingMidNodes) {
-              const nStyle = parseOptionsString(pn.opts, drawScope, customColors, unitPx, scope.vars, scope.customFuncs);
+              const nStyle = parseOptionsString(pn.opts, nodeBaseScope, customColors, unitPx, scope.vars, scope.customFuncs);
               const tPos = nStyle.pos ?? 0.5;
               emitNodeItem(
                 pn.text,
@@ -2914,7 +2984,8 @@ function executeTikzStatements(
                   x: lastSegFrom.x + (lastSegTo.x - lastSegFrom.x) * tPos,
                   y: lastSegFrom.y + (lastSegTo.y - lastSegFrom.y) * tPos,
                 },
-                localToSvgPt
+                localToSvgPt,
+                deferredNodeItems
               );
             }
             if (uCur) curPt = nextPt;
@@ -2992,15 +3063,28 @@ function executeTikzStatements(
 
       // circle (r) or circle [radius=r]
       if (pathStr.startsWith('circle', idx)) {
+        const parseCircleRadiusPx = (rawExpr: string): number | null => {
+          const trimmed = rawExpr.trim();
+          const unitM = trimmed.match(/^(-?\d+(?:\.\d+)?)\s*(cm|mm|pt|em|ex|in|px)$/i);
+          const sc = Math.abs(drawScope.scaleX);
+          if (unitM) {
+            const basePx = parseLengthToPx(trimmed, unitPx);
+            if (basePx === null) return null;
+            const scaled = basePx * sc;
+            return unitM[2].toLowerCase() === 'pt' && parseFloat(unitM[1]) >= 1
+              ? Math.max(1.5, scaled)
+              : scaled;
+          }
+          const unitless = evalMathExpr(trimmed, scope.vars, false, scope.customFuncs);
+          return unitless !== null ? unitless * unitPx * sc : null;
+        };
         let rPx: number | null = null;
         let nextIdx = idx + 6;
         while (nextIdx < pathStr.length && /\s/.test(pathStr[nextIdx])) nextIdx++;
         if (pathStr[nextIdx] === '(') {
           const paren = readBalanced(pathStr, nextIdx, '(', ')');
           if (paren) {
-            rPx =
-              parseLengthToPx(paren.content, unitPx * Math.abs(drawScope.scaleX)) ??
-              (evalMathExpr(paren.content, scope.vars, false, scope.customFuncs) ?? 0) * unitPx * Math.abs(drawScope.scaleX);
+            rPx = parseCircleRadiusPx(paren.content);
             nextIdx = paren.endIdx + 1;
           }
         } else if (pathStr[nextIdx] === '[') {
@@ -3008,9 +3092,7 @@ function executeTikzStatements(
           if (brk) {
             const radM = brk.content.match(/radius\s*=\s*([^,\]]+)/);
             if (radM) {
-              rPx =
-                parseLengthToPx(radM[1], unitPx * Math.abs(drawScope.scaleX)) ??
-                (evalMathExpr(radM[1], scope.vars, false, scope.customFuncs) ?? 0) * unitPx * Math.abs(drawScope.scaleX);
+              rPx = parseCircleRadiusPx(radM[1]);
             }
             nextIdx = brk.endIdx + 1;
           }
@@ -3212,26 +3294,22 @@ function executeTikzStatements(
       }
 
       // Inline node[...] {...} along path
-      if (pathStr.startsWith('node', idx)) {
-        const restN = pathStr.slice(idx);
-        const nm = restN.match(/^node(?:\s*\[([^\]]*)\])?\s*(?:\(([^)]+)\))?\s*\{/);
-        if (nm) {
-          const braceIdx = idx + nm[0].length - 1;
-          const br = readBalanced(pathStr, braceIdx, '{', '}');
-          if (br) {
-            const nStyle = parseOptionsString(nm[1] || '', drawScope, customColors, unitPx, scope.vars, scope.customFuncs);
-            const tPos = nStyle.pos ?? 1;
-            const anchorPt: Point2D =
-              nStyle.pos !== undefined
-                ? {
-                    x: lastSegFrom.x + (lastSegTo.x - lastSegFrom.x) * tPos,
-                    y: lastSegFrom.y + (lastSegTo.y - lastSegFrom.y) * tPos,
-                  }
-                : curPt;
-            emitNodeItem(br.content, nStyle, anchorPt, localToSvgPt);
-            idx = br.endIdx + 1;
-            continue;
-          }
+      if (pathStr.startsWith('node', idx) && !/[a-zA-Z]/.test(pathStr[idx + 4] || '')) {
+        const parsedInline = parseNodeHeader(pathStr, idx + 4);
+        if (parsedInline) {
+          const nStyle = parseOptionsString(parsedInline.opts, nodeBaseScope, customColors, unitPx, scope.vars, scope.customFuncs);
+          const tPos = nStyle.pos ?? 1;
+          const anchorPt: Point2D = parsedInline.atCoord
+            ? resolveCoordinateExpr(parsedInline.atCoord, namedCoords, curPt, false, scope.vars, scope.customFuncs) ?? curPt
+            : nStyle.pos !== undefined
+            ? {
+                x: lastSegFrom.x + (lastSegTo.x - lastSegFrom.x) * tPos,
+                y: lastSegFrom.y + (lastSegTo.y - lastSegFrom.y) * tPos,
+              }
+            : curPt;
+          emitNodeItem(parsedInline.text, nStyle, anchorPt, localToSvgPt, deferredNodeItems);
+          idx = parsedInline.endIdx + 1;
+          continue;
         }
       }
 
@@ -3326,6 +3404,7 @@ function executeTikzStatements(
           maxX: maxX + arrowPad,
           maxY: maxY + arrowPad,
         };
+        let clippedOut = false;
         if (scope.clipBounds && !isClipStmt) {
           const cb = scope.clipBounds;
           itemBounds = {
@@ -3335,35 +3414,40 @@ function executeTikzStatements(
             maxY: Math.min(cb.maxY, itemBounds.maxY),
           };
           if (itemBounds.minX > itemBounds.maxX || itemBounds.minY > itemBounds.maxY) {
-            continue;
+            clippedOut = true;
           }
         }
-        let fillAttr = 'none';
-        let fillOpAttr = '';
-        if (doFill && !isClipStmt) {
-          if (st.pattern) {
-            const patId = ensurePattern(st.pattern, st.patternColor ?? st.stroke);
-            fillAttr = `url(#${patId})`;
-          } else {
-            fillAttr = st.fill;
-            if (st.fillOpacity < 1) fillOpAttr = ` fill-opacity="${st.fillOpacity}"`;
+        if (!clippedOut) {
+          let fillAttr = 'none';
+          let fillOpAttr = '';
+          if (doFill && !isClipStmt) {
+            if (st.pattern) {
+              const patId = ensurePattern(st.pattern, st.patternColor ?? st.stroke);
+              fillAttr = `url(#${patId})`;
+            } else {
+              fillAttr = st.fill;
+              if (st.fillOpacity < 1) fillOpAttr = ` fill-opacity="${st.fillOpacity}"`;
+            }
           }
-        }
-        const strokeAttr = doStroke ? st.stroke : 'none';
-        const dashAttr = st.dashArray ? ` stroke-dasharray="${st.dashArray}"` : '';
-        const opAttr = st.strokeOpacity < 1 ? ` stroke-opacity="${st.strokeOpacity}"` : '';
-        const mStart =
-          doStroke && st.arrowStart ? ` marker-start="url(#${ensureArrow(st.stroke)})"` : '';
-        const mEnd =
-          doStroke && st.arrowEnd ? ` marker-end="url(#${ensureArrow(st.stroke)})"` : '';
-        const clipAttr = scope.clipId && !isClipStmt ? ` clip-path="url(#${scope.clipId})"` : '';
+          const strokeAttr = doStroke ? st.stroke : 'none';
+          const dashAttr = st.dashArray ? ` stroke-dasharray="${st.dashArray}"` : '';
+          const opAttr = st.strokeOpacity < 1 ? ` stroke-opacity="${st.strokeOpacity}"` : '';
+          const mStart =
+            doStroke && st.arrowStart ? ` marker-start="url(#${ensureArrow(st.stroke)})"` : '';
+          const mEnd =
+            doStroke && st.arrowEnd ? ` marker-end="url(#${ensureArrow(st.stroke)})"` : '';
+          const clipAttr = scope.clipId && !isClipStmt ? ` clip-path="url(#${scope.clipId})"` : '';
 
-        items.push({
-          kind: 'path',
-          svg: `<path d="${dStr}" fill="${fillAttr}"${fillOpAttr} stroke="${strokeAttr}" stroke-width="${st.strokeWidth}"${dashAttr}${opAttr} stroke-linecap="round" stroke-linejoin="round"${mStart}${mEnd}${clipAttr}/>`,
-          bounds: itemBounds,
-        });
+          items.push({
+            kind: 'path',
+            svg: `<path d="${dStr}" fill="${fillAttr}"${fillOpAttr} stroke="${strokeAttr}" stroke-width="${st.strokeWidth}"${dashAttr}${opAttr} stroke-linecap="round" stroke-linejoin="round"${mStart}${mEnd}${clipAttr}/>`,
+            bounds: itemBounds,
+          });
+        }
       }
+    }
+    if (deferredNodeItems.length > 0) {
+      items.push(...deferredNodeItems);
     }
   }
 }
