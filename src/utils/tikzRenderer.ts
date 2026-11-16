@@ -1874,15 +1874,20 @@ function renderTkzTabToItems(
         bounds: { minX: 4, minY: rY, maxX: labelColW - 4, maxY: rY + rowH },
       });
 
-      const tokens = splitTopLevel(br.content, ',').map((t) => t.trim());
-      // tkzTabLine format: token 0 is before x0, token 1 is at x0, token 2 is between x0 and x1, token 3 is at x1...
+      const tokens = splitTopLevel(br.content, ',').map((t) => {
+        const s = t.trim();
+        return s.startsWith('{') && s.endsWith('}') ? s.slice(1, -1).trim() : s;
+      });
+      // tkzTabLine format: even indices (0, 2, 4, ...) sit at x_0, x_1, x_2, ...;
+      // odd indices (1, 3, 5, ...) sit in the interval between x_k and x_{k+1}.
       tokens.forEach((tok, idx) => {
         if (!tok) return;
-        const isAtNode = idx % 2 === 1;
-        const k = Math.floor((idx - 1) / 2);
-        const cx = isAtNode ? colX(k) : idx === 0 ? labelColW + 14 : (colX(k) + colX(k + 1)) / 2;
+        const isAtNode = idx % 2 === 0;
+        const k = Math.floor(idx / 2);
+        if (k >= numCols || (!isAtNode && k + 1 >= numCols)) return;
+        const cx = isAtNode ? colX(k) : (colX(k) + colX(k + 1)) / 2;
 
-        if (tok === 'd' || tok === '||') {
+        if (tok === 'd' || tok === 'D' || tok === '||' || tok === '\\|\\|') {
           items.push({
             kind: 'line',
             svg: `<line x1="${(cx - 2).toFixed(1)}" y1="${rY}" x2="${(cx - 2).toFixed(1)}" y2="${rY + rowH}" stroke="#0F172A" stroke-width="1.1"/><line x1="${(cx + 2).toFixed(1)}" y1="${rY}" x2="${(cx + 2).toFixed(1)}" y2="${rY + rowH}" stroke="#0F172A" stroke-width="1.1"/>`,
@@ -1911,8 +1916,20 @@ function renderTkzTabToItems(
             bounds: { minX: cx, minY: rY, maxX: cx, maxY: rY + rowH },
           });
         } else if (tok === 'h') {
-          const xStart = idx === 0 ? labelColW : colX(Math.max(0, k));
-          const xEnd = idx === 0 ? colX(0) : colX(Math.min(numCols - 1, k + 1));
+          const xStart = isAtNode
+            ? k === 0
+              ? labelColW
+              : colX(k) - 6
+            : k === 0 && !tokens[0]
+            ? labelColW
+            : colX(k);
+          const xEnd = isAtNode
+            ? k === numCols - 1
+              ? totalW
+              : colX(k) + 6
+            : k === numCols - 2 && !tokens[2 * (numCols - 1)]
+            ? totalW
+            : colX(k + 1);
           items.push({
             kind: 'rect',
             svg: `<rect x="${xStart.toFixed(1)}" y="${rY}" width="${Math.max(10, xEnd - xStart).toFixed(1)}" height="${rowH}" fill="url(#pat_ne)" stroke="none"/>`,
