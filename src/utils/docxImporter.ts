@@ -7,6 +7,10 @@ import type {
   TableCellData,
 } from '../types/document';
 import { splitTextPreservingInlineMath } from './latexParser';
+import {
+  extractLatexFromOleBuffer,
+  extractLatexFromWmfBuffer,
+} from './mtefParser';
 
 const UNICODE_MATH_TO_LATEX: Record<string, string> = {
   '≤': '\\leq ',
@@ -153,7 +157,24 @@ function getLocalName(el: Element): string {
 function mapMathChars(raw: string): string {
   let out = '';
   for (const ch of raw) {
-    out += UNICODE_MATH_TO_LATEX[ch] ?? ch;
+    const code = ch.charCodeAt(0);
+    if (code === 0x5c) {
+      out += '\\setminus ';
+    } else if (code === 0xef02) {
+      out += '\\,';
+    } else if (code === 0xef03) {
+      out += '\\;';
+    } else if (code === 0xef04) {
+      out += '\\quad ';
+    } else if (code === 0xef05) {
+      out += '\\qquad ';
+    } else if (code >= 0xef00 && code <= 0xef0f) {
+      out += code === 0xef00 ? '' : ' ';
+    } else if ((code >= 0xe000 && code <= 0xf8ff) || (code >= 0x200b && code <= 0x200f) || (code >= 0x2060 && code <= 0x2064) || code === 0xfeff) {
+      continue;
+    } else {
+      out += UNICODE_MATH_TO_LATEX[ch] ?? ch;
+    }
   }
   return out;
 }
@@ -712,6 +733,9 @@ function findBlipEmbedId(node: Element): string | null {
   if (tag === 'blip') {
     return getAttr(node, 'embed') || getAttr(node, 'link');
   }
+  if (tag === 'imagedata') {
+    return getAttr(node, 'id') || getAttr(node, 'relid') || getAttr(node, 'pict');
+  }
   for (let i = 0; i < node.childNodes.length; i++) {
     const ch = node.childNodes[i];
     if (ch.nodeType === 1) {
@@ -722,6 +746,27 @@ function findBlipEmbedId(node: Element): string | null {
   return null;
 }
 
+function findOleObjectRelId(node: Element): string | null {
+  const tag = getLocalName(node);
+  if (tag === 'OLEObject') {
+    return getAttr(node, 'id');
+  }
+  for (let i = 0; i < node.childNodes.length; i++) {
+    const ch = node.childNodes[i];
+    if (ch.nodeType === 1) {
+      const found = findOleObjectRelId(ch as Element);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+interface DocxMediaContext {
+  mediaMap: Map<string, DecodedImageAsset>;
+  oleLatexMap: Map<string, string>;
+  wmfLatexMap: Map<string, string>;
+}
+
 interface ParsedParagraphResult {
   blocks: DocumentBlock[];
   hasPageBreakAfter: boolean;
@@ -729,7 +774,7 @@ interface ParsedParagraphResult {
 
 function parseParagraphElement(
   pEl: Element,
-  mediaMap: Map<string, DecodedImageAsset>,
+  ctx: DocxMediaContext,
   pageWidthPt: number,
   numberingTracker?: NumberingTracker
 ): ParsedParagraphResult {
@@ -810,6 +855,60 @@ function parseParagraphElement(
   let standaloneEqLatex: string | null = null;
   let hasNonEmptyTextRuns = false;
 
+  const handleEmbeddedObjectOrImage = (
+    el: Element,
+    runStyle?: Omit<InlineSegment, 'type' | 'content'>
+  ) => {
+    const tagName = getLocalName(el);
+    const extraStyle: Partial<InlineSegment> = {};
+    if (runStyle?.underline) extraStyle.underline = true;
+    if (runStyle?.color) extraStyle.color = runStyle.color;
+
+    if (tagName === 'object') {
+      const oleId = findOleObjectRelId(el);
+      if (oleId && ctx.oleLatexMap.has(oleId)) {
+        const latex = ctx.oleLatexMap.get(oleId)!;
+        rawSegments.push({
+          type: 'math',
+          content: latex,
+          ...extraStyle,
+          ...(pendingTab ? { tab_before: true } : {}),
+        });
+        pendingTab = false;
+        return;
+      }
+    }
+
+    const embedId = findBlipEmbedId(el);
+    if (!embedId) return;
+
+    if (ctx.wmfLatexMap.has(embedId)) {
+      const latex = ctx.wmfLatexMap.get(embedId)!;
+      rawSegments.push({
+        type: 'math',
+        content: latex,
+        ...extraStyle,
+        ...(pendingTab ? { tab_before: true } : {}),
+      });
+      pendingTab = false;
+      return;
+    }
+
+    if (ctx.mediaMap.has(embedId)) {
+      const asset = ctx.mediaMap.get(embedId)!;
+      const maxW = Math.min(820, Math.round((asset.width / Math.max(400, pageWidthPt * 1.4)) * 800));
+      const xmax = Math.min(900, 120 + Math.max(220, maxW));
+      standaloneFigures.push({
+        block_type: 'figure',
+        alignment: alignment === 'right' ? 'right' : 'center',
+        croppedImageDataUrl: asset.dataUrl,
+        croppedWidthPx: asset.width,
+        croppedHeightPx: asset.height,
+        box_2d: [100, 120, 420, xmax],
+      });
+    }
+  };
+
   const processNode = (el: Element) => {
     const tag = getLocalName(el);
     if (tag === 'pPr' || tag === 'del' || tag === 'proofErr' || tag === 'bookmarkStart' || tag === 'bookmarkEnd') {
@@ -842,6 +941,11 @@ function parseParagraphElement(
       return;
     }
 
+    if (tag === 'object' || tag === 'drawing' || tag === 'pict') {
+      handleEmbeddedObjectOrImage(el);
+      return;
+    }
+
     if (tag === 'AlternateContent') {
       const choice = getFirstChild(el, 'Choice');
       const fallback = getFirstChild(el, 'Fallback');
@@ -866,7 +970,7 @@ function parseParagraphElement(
         if (cTag === 't' || cTag === 'delText') {
           const txt = cEl.textContent ?? '';
           if (txt) {
-            hasNonEmptyTextRuns = true;
+            if (txt.trim()) hasNonEmptyTextRuns = true;
             rawSegments.push({
               type: 'text',
               content: txt,
@@ -884,20 +988,19 @@ function parseParagraphElement(
           } else {
             rawSegments.push({ type: 'text', content: '\n', ...rStyle });
           }
-        } else if (cTag === 'drawing' || cTag === 'pict') {
-          const embedId = findBlipEmbedId(cEl);
-          if (embedId && mediaMap.has(embedId)) {
-            const asset = mediaMap.get(embedId)!;
-            const maxW = Math.min(820, Math.round((asset.width / Math.max(400, pageWidthPt * 1.4)) * 800));
-            const xmax = Math.min(900, 120 + Math.max(220, maxW));
-            standaloneFigures.push({
-              block_type: 'figure',
-              alignment: alignment === 'right' ? 'right' : 'center',
-              croppedImageDataUrl: asset.dataUrl,
-              croppedWidthPx: asset.width,
-              croppedHeightPx: asset.height,
-              box_2d: [100, 120, 420, xmax],
-            });
+        } else if (cTag === 'drawing' || cTag === 'pict' || cTag === 'object') {
+          handleEmbeddedObjectOrImage(cEl, rStyle);
+        } else if (cTag === 'AlternateContent') {
+          const choice = getFirstChild(cEl, 'Choice');
+          const fallback = getFirstChild(cEl, 'Fallback');
+          const target = choice ?? fallback;
+          if (target) {
+            for (const inner of getChildElements(target)) {
+              const iTag = getLocalName(inner);
+              if (iTag === 'drawing' || iTag === 'pict' || iTag === 'object') {
+                handleEmbeddedObjectOrImage(inner, rStyle);
+              }
+            }
           }
         }
       }
@@ -912,14 +1015,18 @@ function parseParagraphElement(
 
   const blocks: DocumentBlock[] = [];
 
-  // Check if paragraph is purely one inline <m:oMath> centered on its own line
+  // Check if paragraph is purely one inline equation (<m:oMath> or MathType) centered on its own line
+  const nonBlankSegments = segments.filter(
+    (s) => s.type !== 'text' || s.content.trim() !== ''
+  );
   if (
     !standaloneEqLatex &&
-    segments.length === 1 &&
-    segments[0].type === 'math' &&
+    nonBlankSegments.length === 1 &&
+    nonBlankSegments[0].type === 'math' &&
     alignment === 'center'
   ) {
-    standaloneEqLatex = segments[0].content;
+    standaloneEqLatex = nonBlankSegments[0].content;
+    hasNonEmptyTextRuns = false;
   }
 
   if (standaloneEqLatex && !hasNonEmptyTextRuns) {
@@ -979,7 +1086,7 @@ function isBorderNone(borderEl: Element | null): boolean {
 
 function parseTableElement(
   tblEl: Element,
-  mediaMap: Map<string, DecodedImageAsset>,
+  ctx: DocxMediaContext,
   pageWidthPt: number
 ): DocumentBlock | null {
   const tblPr = getFirstChild(tblEl, 'tblPr');
@@ -1033,7 +1140,7 @@ function parseTableElement(
       let cellAlignment: BlockAlignment = 'left';
 
       cellParagraphs.forEach((pEl, pIdx) => {
-        const res = parseParagraphElement(pEl, mediaMap, pageWidthPt);
+        const res = parseParagraphElement(pEl, ctx, pageWidthPt);
         res.blocks.forEach((b) => {
           if (pIdx === 0 && b.alignment) cellAlignment = b.alignment;
           if (b.block_type === 'equation' && b.latex) {
@@ -1109,8 +1216,12 @@ export async function parseDocxFileToPages(file: File): Promise<PageExtraction[]
   }
   const numberingTracker = createNumberingTracker(numberingXml);
 
-  // Load relationships -> media assets
+  // Load relationships -> media assets + MathType OLE / WMF equations
   const mediaMap = new Map<string, DecodedImageAsset>();
+  const oleLatexMap = new Map<string, string>();
+  const wmfLatexMap = new Map<string, string>();
+  const ctx: DocxMediaContext = { mediaMap, oleLatexMap, wmfLatexMap };
+
   const relsFile = zip.file('word/_rels/document.xml.rels');
   if (relsFile) {
     const relsStr = await relsFile.async('string');
@@ -1121,19 +1232,43 @@ export async function parseDocxFileToPages(file: File): Promise<PageExtraction[]
         const id = rel.getAttribute('Id');
         const target = rel.getAttribute('Target');
         const type = rel.getAttribute('Type') ?? '';
-        if (!id || !target || !type.includes('/image')) return;
+        if (!id || !target) return;
 
-        const cleanTarget = target.startsWith('/')
-          ? target.slice(1)
-          : target.startsWith('word/')
-          ? target
-          : `word/${target.replace(/^\.\//, '')}`;
+        const normTarget = target.replace(/\\/g, '/').replace(/^\.\.\//, '');
+        const cleanTarget = normTarget.startsWith('/')
+          ? normTarget.slice(1)
+          : normTarget.startsWith('word/')
+          ? normTarget
+          : `word/${normTarget.replace(/^\.\//, '')}`;
+
+        if (type.includes('/oleObject')) {
+          const oleFile = zip.file(cleanTarget);
+          if (!oleFile) return;
+          const rawBuf = await oleFile.async('arraybuffer');
+          const latex = extractLatexFromOleBuffer(new Uint8Array(rawBuf));
+          if (latex) {
+            oleLatexMap.set(id, latex);
+          }
+          return;
+        }
+
+        if (!type.includes('/image')) return;
 
         const imgFile = zip.file(cleanTarget);
         if (!imgFile) return;
 
         const ext = cleanTarget.split('.').pop()?.toLowerCase() ?? 'png';
         const rawBuf = await imgFile.async('arraybuffer');
+        if (ext === 'wmf') {
+          const latex = extractLatexFromWmfBuffer(new Uint8Array(rawBuf));
+          if (latex) {
+            wmfLatexMap.set(id, latex);
+          }
+          return;
+        }
+        if (ext === 'emf') {
+          return;
+        }
         const decoded = await normalizeImageToPngDataUrl(rawBuf, ext);
         if (decoded) {
           mediaMap.set(id, decoded);
@@ -1179,13 +1314,13 @@ export async function parseDocxFileToPages(file: File): Promise<PageExtraction[]
   for (const child of bodyChildren) {
     const tag = getLocalName(child);
     if (tag === 'p') {
-      const res = parseParagraphElement(child, mediaMap, pageWidthPt, numberingTracker);
+      const res = parseParagraphElement(child, ctx, pageWidthPt, numberingTracker);
       res.blocks.forEach(pushBlock);
       if (res.hasPageBreakAfter) {
         startNewPage();
       }
     } else if (tag === 'tbl') {
-      const tblBlock = parseTableElement(child, mediaMap, pageWidthPt);
+      const tblBlock = parseTableElement(child, ctx, pageWidthPt);
       if (tblBlock) pushBlock(tblBlock);
     } else if (tag === 'sdt') {
       const sdtContent = getFirstChild(child, 'sdtContent');
@@ -1193,10 +1328,10 @@ export async function parseDocxFileToPages(file: File): Promise<PageExtraction[]
         for (const inner of getChildElements(sdtContent)) {
           const innerTag = getLocalName(inner);
           if (innerTag === 'p') {
-            const res = parseParagraphElement(inner, mediaMap, pageWidthPt, numberingTracker);
+            const res = parseParagraphElement(inner, ctx, pageWidthPt, numberingTracker);
             res.blocks.forEach(pushBlock);
           } else if (innerTag === 'tbl') {
-            const tblBlock = parseTableElement(inner, mediaMap, pageWidthPt);
+            const tblBlock = parseTableElement(inner, ctx, pageWidthPt);
             if (tblBlock) pushBlock(tblBlock);
           }
         }

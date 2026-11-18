@@ -1002,9 +1002,15 @@ export async function buildDocxBuffer(
     addPageBreaks?: boolean;
     choiceLayout?: ChoiceLayoutMode;
     mathFormat?: MathOutputFormat;
+    underlineCorrectChoice?: boolean;
   } = {}
 ): Promise<Buffer> {
-  const { addPageBreaks = true, choiceLayout = 'tabs', mathFormat = 'omml' } = options;
+  const {
+    addPageBreaks = true,
+    choiceLayout = 'tabs',
+    mathFormat = 'omml',
+    underlineCorrectChoice = false,
+  } = options;
   const mediaItems: MediaItem[] = [];
   const bodyChunks: string[] = [];
 
@@ -1049,7 +1055,12 @@ export async function buildDocxBuffer(
         ? Math.max(8, Math.min(20, page.base_font_size_pt))
         : defaultPageBaseFontPt;
 
-    const transformedBlocks = transformBlocksForChoiceLayout(page.blocks, choiceLayout, geom);
+    const transformedBlocks = transformBlocksForChoiceLayout(
+      page.blocks,
+      choiceLayout,
+      geom,
+      underlineCorrectChoice
+    );
     const bands = groupBlocksIntoVisualBands(transformedBlocks, geom);
 
     if (pageIdx > 0 && addPageBreaks) {

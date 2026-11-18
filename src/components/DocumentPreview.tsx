@@ -48,6 +48,7 @@ interface DocumentPreviewProps {
   pages: PageExtraction[];
   choiceLayout?: ChoiceLayoutMode;
   mathFormat?: MathOutputFormat;
+  underlineCorrectChoice?: boolean;
   onSelectEquation?: (latex: string, isDisplay: boolean) => void;
   editable?: boolean;
   isEditMode?: boolean;
@@ -242,14 +243,16 @@ function RenderSegments({
         };
 
         return (
-          <span key={idx} className={textClass} style={segStyle}>
+          <span key={idx}>
             {tabPrefix}
-            {lines.map((line, lIdx) => (
-              <span key={lIdx} className="whitespace-pre-wrap">
-                {line}
-                {lIdx < lines.length - 1 && <br />}
-              </span>
-            ))}
+            <span className={textClass} style={segStyle}>
+              {lines.map((line, lIdx) => (
+                <span key={lIdx} className="whitespace-pre-wrap">
+                  {line}
+                  {lIdx < lines.length - 1 && <br />}
+                </span>
+              ))}
+            </span>
           </span>
         );
       })}
@@ -1593,6 +1596,7 @@ export function DocumentPreview({
   pages,
   choiceLayout = 'table',
   mathFormat = 'omml',
+  underlineCorrectChoice = false,
   onSelectEquation,
   editable = false,
   isEditMode = false,
@@ -1717,7 +1721,12 @@ export function DocumentPreview({
           const transformedBlocks: DocumentBlock[] = [];
 
           page.blocks.forEach((rawBlk, srcIdx) => {
-            const expanded = transformBlocksForChoiceLayout([rawBlk], choiceLayout, geom);
+            const expanded = transformBlocksForChoiceLayout(
+              [rawBlk],
+              choiceLayout,
+              geom,
+              underlineCorrectChoice
+            );
             expanded.forEach((tb) => {
               sourceIndexMap.set(tb, srcIdx);
               transformedBlocks.push(tb);

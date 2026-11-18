@@ -185,11 +185,23 @@ export function computePageGeometry(page: PageExtraction): PageGeometry {
 
 const CHOICE_LABEL_REGEX = /^[A-Da-d][\.\)\:](\s|$)/;
 
-function getCellPlainText(cell: TableCellData): string {
-  return (cell.segments ?? [])
+export function hasLeadingChoiceLabel(segs?: InlineSegment[] | null): boolean {
+  if (!segs || segs.length === 0) return false;
+  const plain = segs
     .map((s) => s.content ?? '')
     .join('')
     .trim();
+  if (CHOICE_LABEL_REGEX.test(plain)) return true;
+
+  let textPrefix = '';
+  for (let i = 0; i < segs.length; i++) {
+    if (segs[i].type === 'math') {
+      return /^[A-Da-d][\.\)\:]$/.test(textPrefix.trim());
+    }
+    textPrefix += segs[i].content ?? '';
+    if (textPrefix.trim().length > 4) break;
+  }
+  return false;
 }
 
 export function isChoiceTableBlock(blk: DocumentBlock): boolean {
@@ -213,7 +225,7 @@ export function isChoiceTableBlock(blk: DocumentBlock): boolean {
   let choiceCellCount = 0;
   for (const row of blk.table_rows) {
     for (const cell of row) {
-      if (CHOICE_LABEL_REGEX.test(getCellPlainText(cell))) {
+      if (hasLeadingChoiceLabel(cell.segments)) {
         choiceCellCount++;
       }
     }
@@ -222,64 +234,144 @@ export function isChoiceTableBlock(blk: DocumentBlock): boolean {
   return Boolean(blk.is_choice_block) && choiceCellCount >= 1;
 }
 
-function splitSegmentsIntoChoiceGroups(segments: InlineSegment[]): InlineSegment[][] | null {
+function sliceSegmentsByTextRanges(
+  segments: InlineSegment[],
+  splitOffsets: number[]
+): InlineSegment[][] {
+  if (splitOffsets.length === 0) return [segments.map((s) => ({ ...s, tab_before: false }))];
+
+  const sorted = Array.from(new Set(splitOffsets.filter((n) => n > 0))).sort((a, b) => a - b);
+  const groups: InlineSegment[][] = [];
+  let current: InlineSegment[] = [];
+  let cursor = 0;
+  let splitIdx = 0;
+
+  for (const seg of segments) {
+    const content = seg.content ?? '';
+    if (seg.type !== 'text') {
+      while (splitIdx < sorted.length && cursor >= sorted[splitIdx]) {
+        groups.push(current);
+        current = [];
+        splitIdx += 1;
+      }
+      current.push({ ...seg, tab_before: false });
+      cursor += content.length;
+      continue;
+    }
+
+    let localOffset = 0;
+    while (localOffset < content.length) {
+      const nextSplit = splitIdx < sorted.length ? sorted[splitIdx] : Infinity;
+      const segEndGlobal = cursor + content.length;
+      if (nextSplit <= cursor) {
+        groups.push(current);
+        current = [];
+        splitIdx += 1;
+        continue;
+      }
+      if (nextSplit < segEndGlobal) {
+        const cut = nextSplit - cursor;
+        const part = content.slice(localOffset, cut);
+        if (part.length > 0) {
+          current.push({ ...seg, content: part, tab_before: false });
+        }
+        groups.push(current);
+        current = [];
+        localOffset = cut;
+        splitIdx += 1;
+      } else {
+        const part = content.slice(localOffset);
+        if (part.length > 0) {
+          current.push({ ...seg, content: part, tab_before: false });
+        }
+        break;
+      }
+    }
+    cursor += content.length;
+  }
+
+  groups.push(current);
+
+  return groups
+    .map((g) => {
+      const cloned = g.map((s) => ({ ...s }));
+      while (cloned.length > 0 && cloned[0].type === 'text') {
+        const trimmed = cloned[0].content.trimStart();
+        if (trimmed.length === 0) {
+          cloned.shift();
+        } else {
+          cloned[0].content = trimmed;
+          break;
+        }
+      }
+      while (cloned.length > 0 && cloned[cloned.length - 1].type === 'text') {
+        const last = cloned[cloned.length - 1];
+        const trimmed = last.content.trimEnd();
+        if (trimmed.length === 0) {
+          cloned.pop();
+        } else {
+          last.content = trimmed;
+          break;
+        }
+      }
+      return cloned;
+    })
+    .filter((g) => g.length > 0);
+}
+
+export function splitSegmentsIntoChoiceGroups(segments: InlineSegment[]): InlineSegment[][] | null {
+  if (!segments || segments.length === 0) return null;
+
   const hasTabs = segments.some((s) => s.tab_before);
+  let initialGroups: InlineSegment[][];
   if (hasTabs) {
-    const groups: InlineSegment[][] = [];
+    initialGroups = [];
     let current: InlineSegment[] = [];
     for (const seg of segments) {
       if (seg.tab_before && current.length > 0) {
-        groups.push(current);
+        initialGroups.push(current);
         current = [{ ...seg, tab_before: false }];
       } else {
         current.push({ ...seg, tab_before: false });
       }
     }
-    if (current.length > 0) groups.push(current);
-    const labelMatches = groups.filter((g) => {
-      const txt = g
-        .map((s) => s.content)
-        .join('')
-        .trim();
-      return CHOICE_LABEL_REGEX.test(txt);
-    }).length;
-    return groups.length >= 2 && labelMatches >= 2 ? groups : null;
+    if (current.length > 0) initialGroups.push(current);
+  } else {
+    initialGroups = [segments];
   }
 
-  // Try splitting by explicit multi-space or newline before choice labels A., B., C., D. or a), b), c), d)
-  const splitGroups: InlineSegment[][] = [];
-  let current: InlineSegment[] = [];
-
-  for (const seg of segments) {
-    if (seg.type !== 'text') {
-      current.push({ ...seg });
-      continue;
+  // Further split each group if it contains multi-space or newline separated choice labels across runs
+  const finalGroups: InlineSegment[][] = [];
+  for (const grp of initialGroups) {
+    let fullPlain = '';
+    const isTextRanges: Array<{ start: number; end: number; isText: boolean }> = [];
+    for (const seg of grp) {
+      const len = (seg.content ?? '').length;
+      isTextRanges.push({ start: fullPlain.length, end: fullPlain.length + len, isText: seg.type === 'text' });
+      fullPlain += seg.content ?? '';
     }
-    const text = seg.content ?? '';
-    const parts = text.split(/(?:(?:\n|\s{2,})(?=[A-Da-d][\.\)\:]\s))/);
-    parts.forEach((part, idx) => {
-      const cleaned = idx === 0 ? part : part.trimStart();
-      if (idx > 0 && current.length > 0) {
-        splitGroups.push(current);
-        current = [];
+
+    const splitOffsets: number[] = [];
+    const markerRe = /(\n|\s{2,})([A-Da-d][\.\)\:])(?=\s|$)/g;
+    let m: RegExpExecArray | null;
+    while ((m = markerRe.exec(fullPlain)) !== null) {
+      const labelPos = m.index + m[1].length;
+      const insideMath = isTextRanges.some((r) => !r.isText && labelPos >= r.start && labelPos < r.end);
+      if (!insideMath && labelPos > 0) {
+        splitOffsets.push(labelPos);
       }
-      if (cleaned.length > 0) {
-        current.push({ ...seg, content: cleaned, tab_before: false });
-      }
-    });
+    }
+
+    if (splitOffsets.length > 0) {
+      finalGroups.push(...sliceSegmentsByTextRanges(grp, splitOffsets));
+    } else {
+      finalGroups.push(grp.map((s) => ({ ...s, tab_before: false })));
+    }
   }
-  if (current.length > 0) splitGroups.push(current);
 
-  const choiceCount = splitGroups.filter((g) =>
-    CHOICE_LABEL_REGEX.test(
-      g
-        .map((s) => s.content)
-        .join('')
-        .trim()
-    )
-  ).length;
+  const choiceCount = finalGroups.filter((g) => hasLeadingChoiceLabel(g)).length;
 
-  return splitGroups.length >= 2 && choiceCount >= 2 ? splitGroups : null;
+  return finalGroups.length >= 2 && choiceCount >= 2 ? finalGroups : null;
 }
 
 function computeTabStopsForColCount(
@@ -569,10 +661,47 @@ function ensureTabStopsOnChoiceParagraph(
   ];
 }
 
+function applyUnderlineToChoiceCell(cell: TableCellData): TableCellData {
+  if (!cell.is_correct || !cell.segments || cell.segments.length === 0) return cell;
+  const firstIdx = cell.segments.findIndex((s) => s.type === 'text' && (s.content ?? '').length > 0);
+  if (firstIdx !== 0) return cell;
+
+  const firstSeg = cell.segments[0];
+  const m = (firstSeg.content ?? '').match(/^(\s*)([A-Da-d])([\.\)\:][\s\S]*)$/);
+  if (!m) return cell;
+
+  const [, lead, letter, rest] = m;
+  const nextSegments: InlineSegment[] = [];
+  if (lead) {
+    nextSegments.push({ ...firstSeg, content: lead, underline: false });
+  }
+  nextSegments.push({ ...firstSeg, content: letter, underline: true });
+  if (rest) {
+    nextSegments.push({ ...firstSeg, content: rest, underline: false });
+  }
+  nextSegments.push(...cell.segments.slice(1));
+
+  return {
+    ...cell,
+    segments: nextSegments,
+  };
+}
+
+function applyUnderlineToChoiceTable(blk: DocumentBlock): DocumentBlock {
+  if (blk.block_type !== 'table' || !blk.table_rows) return blk;
+  const hasAnyCorrect = blk.table_rows.some((row) => row.some((c) => c.is_correct));
+  if (!hasAnyCorrect) return blk;
+  return {
+    ...blk,
+    table_rows: blk.table_rows.map((row) => row.map(applyUnderlineToChoiceCell)),
+  };
+}
+
 export function transformBlocksForChoiceLayout(
   blocks: DocumentBlock[],
   choiceLayout: ChoiceLayoutMode,
-  geom: PageGeometry
+  geom: PageGeometry,
+  underlineCorrectChoice = false
 ): DocumentBlock[] {
   const result: DocumentBlock[] = [];
 
@@ -591,7 +720,12 @@ export function transformBlocksForChoiceLayout(
           };
           return {
             ...cell,
-            blocks: transformBlocksForChoiceLayout(cell.blocks, choiceLayout, cellGeom),
+            blocks: transformBlocksForChoiceLayout(
+              cell.blocks,
+              choiceLayout,
+              cellGeom,
+              underlineCorrectChoice
+            ),
           };
         });
       });
@@ -601,7 +735,8 @@ export function transformBlocksForChoiceLayout(
 
     if (choiceLayout === 'tabs') {
       if (isChoiceTableBlock(blk)) {
-        const reflowed = reflowChoiceTableIfNeeded(blk, geom);
+        const prepared = underlineCorrectChoice ? applyUnderlineToChoiceTable(blk) : blk;
+        const reflowed = reflowChoiceTableIfNeeded(prepared, geom);
         result.push(...convertChoiceTableToTabParagraphs(reflowed, geom));
         continue;
       }
@@ -611,7 +746,8 @@ export function transformBlocksForChoiceLayout(
       }
     } else if (choiceLayout === 'table') {
       if (isChoiceTableBlock(blk)) {
-        result.push(reflowChoiceTableIfNeeded(blk, geom));
+        const prepared = underlineCorrectChoice ? applyUnderlineToChoiceTable(blk) : blk;
+        result.push(reflowChoiceTableIfNeeded(prepared, geom));
         continue;
       }
       if (blk.block_type === 'paragraph') {

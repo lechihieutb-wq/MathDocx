@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import { createHash } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import type { PageExtraction } from '../src/types/document.ts';
@@ -32,37 +33,35 @@ const inlineSegmentSchema = {
   properties: {
     type: {
       type: Type.STRING,
-      description: "Exactly 'text' for normal prose or 'math' for inline LaTeX math.",
+      description: "'text' or 'math' (inline LaTeX without $/\\(\\) delimiters).",
     },
     content: {
       type: Type.STRING,
-      description: 'Text content or pure LaTeX without $ or \\( \\) delimiters.',
+      description: 'Text or pure LaTeX.',
     },
     bold: {
       type: Type.BOOLEAN,
-      description:
-        'True ONLY if the visual stroke weight in the PDF is clearly boldface (thicker/heavier than normal body text). Must be false or omitted for normal-weight text, including non-bold headings, subtitles, italic notes, table headers without bold strokes, and body text after "Câu 1." or "A.".',
+      description: 'True ONLY if visually boldface. Omit when normal weight.',
     },
     italic: {
       type: Type.BOOLEAN,
-      description: 'True only if the text in the PDF is visually italicized/slanted.',
+      description: 'True only if visually italic. Omit otherwise.',
     },
     underline: {
       type: Type.BOOLEAN,
-      description: 'True only if the text in the PDF has an explicit underline stroke.',
+      description: 'True only if underlined. Omit otherwise.',
     },
     font_size_pt: {
       type: Type.NUMBER,
-      description: 'Optional font size in pt when different from block font_size_pt.',
+      description: 'Font size in pt if different from block.',
     },
     color: {
       type: Type.STRING,
-      description:
-        '6-digit hex color like #DC2626 or #1D4ED8 whenever the text/symbol/math color in the PDF is NOT black/dark-gray. Omit for black text.',
+      description: '6-digit #RRGGBB hex if not black/dark-gray. Omit for black.',
     },
     tab_before: {
       type: Type.BOOLEAN,
-      description: 'True if a tab stop precedes this segment on the same line.',
+      description: 'True if preceded by a tab stop on same line.',
     },
   },
   required: ['type', 'content'],
@@ -79,56 +78,53 @@ const pageExtractionSchema = {
           block_type: {
             type: Type.STRING,
             description:
-              "One of: 'heading', 'paragraph', 'equation', 'table', 'figure', 'horizontal_rule'. IMPORTANT: Always use 'figure' (never 'table') for variation tables (bảng biến thiên with x, y', y and arrows).",
+              "'heading'|'paragraph'|'equation'|'table'|'figure'|'horizontal_rule'. Variation tables (bảng biến thiên) MUST be 'figure'.",
           },
           alignment: {
             type: Type.STRING,
-            description: "One of: 'left', 'center', 'right', 'justify'.",
+            description: "'left'|'center'|'right'|'justify'.",
           },
           heading_level: {
             type: Type.INTEGER,
-            description: '1, 2, or 3 when block_type is heading.',
+            description: '1, 2, or 3 for heading.',
           },
           font_size_pt: {
             type: Type.NUMBER,
-            description: 'Estimated font size in points (e.g., 11, 12, 13, 14, 16) matching the PDF.',
+            description: 'Font size in pt (e.g. 11, 12, 13, 14, 16).',
           },
           line_spacing: {
             type: Type.NUMBER,
-            description: 'Line spacing multiplier (e.g., 1.0, 1.15, 1.3, 1.5).',
+            description: 'Line spacing (e.g. 1.0, 1.15, 1.3, 1.5).',
           },
           indent_left_pt: {
             type: Type.NUMBER,
-            description: 'Extra left indentation in points relative to the main page left margin.',
+            description: 'Left indent in pt from page margin.',
           },
           first_line_indent_pt: {
             type: Type.NUMBER,
-            description:
-              'First-line indent in points (positive for indented paragraph, negative for hanging indent like Câu 1.).',
+            description: 'First-line indent in pt (negative for hanging indent).',
           },
           tab_stops_pt: {
             type: Type.ARRAY,
             items: { type: Type.NUMBER },
-            description: 'Tab stop X positions in points from the page left margin if tabs are used.',
+            description: 'Tab stop X positions in pt from left margin.',
           },
           segments: {
             type: Type.ARRAY,
             items: inlineSegmentSchema,
-            description: 'Ordered inline text/math segments for heading or paragraph.',
+            description: 'Ordered inline segments for heading/paragraph.',
           },
           latex: {
             type: Type.STRING,
-            description: 'Pure LaTeX for standalone display equation (without $$).',
+            description: 'Pure LaTeX for display equation (no $$).',
           },
           table_borderless: {
             type: Type.BOOLEAN,
-            description:
-              'True when using a borderless grid to preserve multi-column headers, 2-col/4-col answer choices (A, B, C, D), or side-by-side layout.',
+            description: 'True for borderless multi-col headers, A/B/C/D choices, or side-by-side grids.',
           },
           is_choice_block: {
             type: Type.BOOLEAN,
-            description:
-              'True when this block represents multiple-choice options (e.g. A., B., C., D. or a), b), c), d)).',
+            description: 'True for multiple-choice options (A./B./C./D. or a)/b)/c)/d)).',
           },
           table_rows: {
             type: Type.ARRAY,
@@ -144,15 +140,15 @@ const pageExtractionSchema = {
                   is_header: { type: Type.BOOLEAN },
                   alignment: {
                     type: Type.STRING,
-                    description: "Cell horizontal alignment: 'left', 'center', 'right', 'justify'.",
+                    description: "'left'|'center'|'right'|'justify'.",
                   },
                   width_pct: {
                     type: Type.NUMBER,
-                    description: 'Approximate column width percentage (0..100) matching the PDF.',
+                    description: 'Column width % (0..100).',
                   },
                   col_span: {
                     type: Type.INTEGER,
-                    description: 'Number of columns spanned by this cell (default 1).',
+                    description: 'Spanned columns (omit if 1).',
                   },
                 },
                 required: ['segments'],
@@ -162,8 +158,7 @@ const pageExtractionSchema = {
           box_2d: {
             type: Type.ARRAY,
             items: { type: Type.INTEGER },
-            description:
-              'Normalized bounding box [ymin, xmin, ymax, xmax] in range 0..1000 for EVERY block on the page. For figure blocks (diagrams, graphs, and variation tables / bảng biến thiên), box_2d MUST tightly yet completely enclose the entire outer border frame, arrows, and all boundary labels/numbers so nothing is clipped.',
+            description: '[ymin, xmin, ymax, xmax] in 0..1000 enclosing the block/figure completely.',
           },
           caption: {
             type: Type.STRING,
@@ -177,45 +172,33 @@ const pageExtractionSchema = {
   required: ['blocks'],
 };
 
-const OCR_SYSTEM_INSTRUCTION = `Bạn là chuyên gia số hóa tài liệu Toán học (OCR & Tái tạo bố cục 100% chuẩn xác) từ PDF/ảnh sang Word (.docx).
-Hãy phân tích chính xác trang tài liệu theo đúng thứ tự đọc từ trên xuống dưới và trả về JSON theo đúng schema để bản Word giống hệt trang PDF gốc về vị trí, căn lề và định dạng chữ.
-
-Quy tắc bắt buộc:
-1. TỌA ĐỘ & VỊ TRÍ CHÍNH XÁC (box_2d):
-   - BẮT BUỘC trả về box_2d=[ymin, xmin, ymax, xmax] trên thang chuẩn hóa 0..1000 cho MỌI khối (heading, paragraph, equation, table, figure, horizontal_rule).
-   - Hệ thống dùng box_2d để tính chính xác lề trang, khoảng cách dọc giữa các đoạn, vị trí thụt lề ngang, độ rộng hình vẽ và bố cục đặt cạnh nhau (ví dụ: đề bài bên trái, hình vẽ bên phải).
-2. ĐỊNH DẠNG IN ĐẬM / IN NGHIÊNG / GẠCH CHÂN / CỠ CHỮ / MÀU SẮC (ĐÚNG 100% THEO TRANG PDF GỐC):
-   - IN ĐẬM (bold): Quan sát thật kỹ độ dày nét chữ (stroke weight) trên ảnh PDF. CHỈ đặt bold=true cho các từ/cụm từ THỰC SỰ IN ĐẬM (nét chữ dày đậm rõ rệt hơn văn bản thường). MỌI chữ có nét mảnh/bình thường — kể cả tiêu đề phụ, dòng căn giữa, dòng cỡ chữ lớn hơn, chữ in nghiêng, ghi chú trong ngoặc, hàng tiêu đề bảng không in đậm, phần đề bài sau "Câu 1.", hoặc nội dung đáp án sau "A.", "B.", "C.", "D." — TUYỆT ĐỐI KHÔNG được gán bold=true (bắt buộc bỏ qua hoặc để bold=false).
-   - IN NGHIÊNG (italic): Quan sát kỹ độ nghiêng nét chữ trên ảnh PDF. BẮT BUỘC đặt italic=true cho MỌI từ/cụm từ/ghi chú/tiêu đề phụ/câu trích dẫn thực sự in nghiêng trên PDF (ví dụ: "(Đề gồm 04 trang)", "(Thí sinh không được sử dụng tài liệu)", "Hướng dẫn giải", "Chú ý:", chữ nghiêng xen giữa câu). Nếu chữ vừa đậm vừa nghiêng -> đặt CẢ bold=true và italic=true; nếu chỉ nghiêng nét mảnh -> CHỈ đặt italic=true, TUYỆT ĐỐI KHÔNG đặt bold=true.
-   - GẠCH CHÂN (underline): Đặt underline=true cho mọi chữ có đường gạch chân bên dưới.
-   - MÀU SẮC CHỮ (color): Quan sát kỹ màu mực thực tế của từng chữ, nhãn câu, tiêu đề, công thức và ô bảng trên PDF! Với chữ màu đen bình thường thì bỏ qua trường color. Với BẤT KỲ chữ/số/công thức nào có màu khác đen (đỏ, xanh dương, xanh lá, tím, cam, nâu, xám nhạt...): BẮT BUỘC gán đúng mã màu hex 6 ký tự dạng "#RRGGBB" (ví dụ: đỏ "#DC2626" hoặc "#FF0000", xanh dương "#1D4ED8" hoặc "#0000FF", xanh lá "#15803D", tím "#7C3AED", cam "#EA580C"). Không được bỏ sót chữ có màu!
-   - BẮT BUỘC tách thành các segment riêng NGAY TẠI ranh giới đổi định dạng (đổi đậm/thường, đứng/nghiêng, gạch chân, đổi màu, đổi cỡ chữ) trên cùng một dòng! Ví dụ:
-     + "Câu 1. Cho hàm số..." -> segment 1 ("Câu 1. ", bold: true, kèm color nếu Câu 1. có màu), segment 2 ("Cho hàm số...", bold: false).
-     + "A. x = 2" -> nếu chỉ "A." in đậm thì tách segment 1 ("A. ", bold: true) và segment 2 (math "x = 2"); nếu "A." không in đậm thì KHÔNG gán bold=true.
-     + Trong block heading hoặc ô bảng is_header=true: hệ thống KHÔNG tự động tô đậm. Chỉ segment nào thực sự in đậm trên PDF mới đặt bold=true; segment nét thường hoặc chỉ in nghiêng phải để bold=false.
-3. VỊ TRÍ CHỮ, CĂN LỀ, THỤT ĐẦU DÒNG & BỐ CỤC NHIỀU CỘT (CHÍNH XÁC 100%):
-   - Đo chính xác box_2d=[ymin, xmin, ymax, xmax] khớp vị trí thực của khối chữ trên trang PDF (không co giãn sai vị trí ngang/dọc) để bảo toàn khoảng cách dòng, thụt lề và bố cục đặt cạnh nhau.
-   - Nhận diện đúng alignment ('left', 'center', 'right', 'justify') cho từng khối và từng ô bảng đúng như vị trí trên trang PDF.
-   - Ghi nhận chính xác indent_left_pt (khi cả khối thụt vào so với lề trái trang), first_line_indent_pt (số dương khi dòng đầu thụt vào trong, số âm như -24 khi thụt lề treo như "Câu 1. ..."), font_size_pt và line_spacing (1.0, 1.15, 1.3...).
-   - Khi nhiều phần tử nằm ngang hàng trên CÙNG MỘT DÒNG nhưng ở các vị trí cột khác nhau (ví dụ: tiêu đề 2 cột "SỞ GD&ĐT... | ĐỀ THI...", ngày tháng/chữ ký bên phải, hoặc hàng đáp án 4 cột / 2x2), HÃY xuất thành block_type="table" với table_borderless=true, kèm width_pct và alignment cho từng ô để vị trí ngang các chữ khớp 100% với bản PDF.
-   - Với đường kẻ ngang phân cách (như dưới tiêu đề đề thi), xuất block_type="horizontal_rule" kèm box_2d.
-4. CÔNG THỨC TOÁN, CHỮ SỐ, DẤU +/- & BẢNG BIỂU:
-   - MỌI biểu thức toán học, ký hiệu biến số, phân số, căn thức, tích phân, giới hạn, ma trận, hệ phương trình PHẢI tách thành segment type="math" (nếu nằm cùng dòng với chữ) hoặc block_type="equation" (nếu đứng riêng một dòng độc lập, giữ đúng alignment của công thức). Luôn xuất mã LaTeX chuẩn xác, KHÔNG bọc bằng $, $$, \\[ \\] hay \\( \\).
-   - BẮT BUỘC đưa TẤT CẢ các số mang ý nghĩa toán học (số nguyên, số thập phân, số âm/dương như 0, 1, -2, +3, 2,5...) và các dấu cộng (+), dấu trừ (-) đứng riêng hoặc gắn với số (ví dụ: "dấu +", "dấu -", "+∞", "-∞") vào segment type="math" (KHÔNG để ở type="text"). Chỉ giữ trong type="text" các số thứ tự nhãn như "Câu 1.", "Bài 2.", "Hình 1", "Bảng 1".
-   - Bảng số liệu thông thường (bảng thống kê, bảng tần số, bảng điểm, bảng giá trị chỉ gồm chữ/số trong ô, KHÔNG có mũi tên biến thiên): BẮT BUỘC giữ nguyên thành block_type="table" với table_borderless=false và is_choice_block=false, ghi đủ 100% số hàng/cột, col_span, is_header và segments.
-   - TUYỆT ĐỐI KHÔNG chuyển Bảng biến thiên (bảng có dòng x, y'/f'(x), y/f(x) kèm mũi tên tăng giảm ↗ ↘ hoặc hai gạch đứng ∥) thành block_type="table".
-5. HÌNH VẼ MINH HỌA & BẢNG BIẾN THIÊN (CHỤP CẮT ẢNH CHÍNH XÁC):
-   - Với mọi hình học không gian/phẳng, đồ thị hàm số, trục số, biểu đồ, ảnh chụp nhúng VÀ MỌI BẢNG BIẾN THIÊN (có dòng x, y'/f'(x), y/f(x) và mũi tên ↗, ↘, dấu +, -, hai gạch đứng ∥), BẮT BUỘC phải xuất thành MỘT block_type="figure" duy nhất, alignment đúng vị trí ('left'/'center'/'right').
-   - TUYỆT ĐỐI KHÔNG tách rời dòng x hoặc dòng y' thành text/table rồi chỉ cắt dòng mũi tên y làm figure — toàn bộ khung bảng biến thiên (đủ cả 3 dòng x, y', y và khung kẻ ngoài) là một figure duy nhất.
-   - TUYỆT ĐỐI KHÔNG xuất lặp lại các chữ/số/ký hiệu nằm BÊN TRONG hình vẽ hoặc đồ thị (như tên đỉnh A, B, C, S, O, chữ x, y trên trục tọa độ, các mốc số trên trục, hoặc nội dung trong bảng biến thiên) thành block paragraph/equation riêng — mọi chi tiết nằm trong khung hình vẽ chỉ nằm trong ảnh figure.
-   - Tọa độ box_2d=[ymin, xmin, ymax, xmax] phải ÔM TRỌN 100% khung hình/đồ thị/bảng biến thiên: từ mép trái ngoài cùng (chứa cột x, y', y và đường viền trái hoặc nhãn trục/đỉnh bên trái) đến mép phải ngoài cùng (chứa cột +∞ hoặc đầu mũi tên trục x), từ đường viền/đỉnh trên cùng (gồm cả chữ y, mũi tên trục Oy, tên đỉnh cao nhất) đến HẾT ĐƯỜNG VIỀN DƯỚI CÙNG và các số ở đáy bảng (như -3, -∞, +∞, giá trị cực tiểu). KHÔNG gộp chữ đề bài phía trên (như "như sau:", "hình bên:") vào box_2d của figure, nhưng phía dưới và hai bên thà dư lề trắng nhẹ (~5–12 đơn vị) tuyệt đối không cắt thiếu viền, mũi tên hoặc chữ ở rìa hình.
-6. Giữ nguyên ngôn ngữ gốc, chính tả, dấu câu và không tự ý thêm nội dung không có trên trang.
-7. TỐI ƯU TỐC ĐỘ JSON: Chỉ xuất các trường tùy chọn (bold, italic, underline, font_size_pt, color, tab_before, heading_level, indent_left_pt, first_line_indent_pt, tab_stops_pt, table_borderless, is_choice_block, alignment/width_pct/col_span của ô, caption) khi có giá trị thực sự là true hoặc khác null/0. TUYỆT ĐỐI KHÔNG gộp segment khiến chữ thường bị gán nhầm bold=true.`;
+const OCR_SYSTEM_INSTRUCTION = `Chuyên gia OCR Toán học chính xác 100% từ ảnh PDF sang JSON để tái tạo đúng bố cục Word (.docx). Đọc từ trên xuống dưới theo quy tắc:
+1. box_2d=[ymin,xmin,ymax,xmax] (0..1000) BẮT BUỘC cho mọi block để tái tạo lề, khoảng cách, thụt lề, chiều rộng hình và bố cục cạnh nhau.
+2. Định dạng chữ chuẩn theo ảnh gốc — TÁCH segment ngay khi đổi kiểu (đậm/thường, đứng/nghiêng, gạch chân, màu, cỡ chữ):
+   - bold=true CHỈ khi nét chữ thực sự dày đậm; KHÔNG tô đậm chữ thường, tiêu đề phụ mảnh, ghi chú nghiêng, nội dung sau "Câu 1." hay "A.". Heading và is_header không tự đậm.
+   - italic=true cho mọi chữ nghiêng (ghi chú trong ngoặc, "Hướng dẫn giải", chữ nghiêng xen câu...).
+   - underline=true cho chữ có gạch chân.
+   - color="#RRGGBB" cho MỌI chữ/nhãn/công thức không phải màu đen (đỏ #DC2626, xanh dương #1D4ED8, xanh lá #15803D, tím #7C3AED, cam #EA580C...). Bỏ qua color nếu màu đen.
+3. Vị trí & bố cục:
+   - Ghi đúng alignment, indent_left_pt, first_line_indent_pt (số âm cho hanging indent như "Câu 1."), font_size_pt, line_spacing.
+   - Nhiều phần tử nằm ngang hàng trên cùng dòng (tiêu đề 2-3 cột, chữ ký phải, hàng đáp án A/B/C/D 2x2 hoặc 4 cột) -> block_type="table", table_borderless=true kèm width_pct và alignment từng ô (is_choice_block=true với đáp án).
+   - Đường kẻ ngang -> block_type="horizontal_rule".
+4. Công thức Toán & bảng số liệu:
+   - Mọi biểu thức/ký hiệu toán -> segment type="math" hoặc block_type="equation" bằng LaTeX thuần (KHÔNG bọc $, $$, \\( \\), \\[ \\]).
+   - Mọi số toán học (0, 1, -2, +3, 2,5...) và dấu +/- toán học đưa vào type="math" (chỉ giữ số nhãn như "Câu 1.", "Bài 2.", "Hình 1" trong type="text").
+   - Bảng số liệu/thống kê không có mũi tên biến thiên -> block_type="table", table_borderless=false, is_choice_block=false, đủ hàng/cột/col_span.
+5. Hình vẽ & Bảng biến thiên -> block_type="figure" duy nhất:
+   - Mọi hình học, đồ thị, trục số, biểu đồ VÀ MỌI BẢNG BIẾN THIÊN (có x, y'/f'(x), y/f(x), mũi tên ↗ ↘, ∥) PHẢI là MỘT block_type="figure" duy nhất (TUYỆT ĐỐI không xuất bảng biến thiên thành table hoặc tách dòng x/y').
+   - Không xuất lặp chữ/số/đỉnh nằm bên trong hình vẽ ra ngoài.
+   - box_2d phải ôm trọn 100% khung viền, mũi tên, nhãn trục/đỉnh và các số ở rìa/đáy (dư nhẹ 5-12 đơn vị, không cắt thiếu và không gộp chữ đề bài phía trên).
+6. Giữ nguyên ngôn ngữ, chính tả, dấu câu. Chỉ xuất các field tùy chọn khi khác mặc định (true / khác null / khác 0) để JSON gọn và nhanh.`;
 
 const OCR_MODELS_FAST = ['gemini-3.1-flash-lite', 'gemini-4-hydrogen'] as const;
 const OCR_MODELS_ACCURATE = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'] as const;
 const DAILY_QUOTA_COOLDOWN_MS = 10 * 60 * 1000;
 const modelCooldownUntil = new Map<string, number>();
+const OCR_CACHE_MAX = 48;
+const ocrResultCache = new Map<string, PageExtraction['blocks']>();
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -279,7 +262,8 @@ async function generateOcrWithModelFallback(
     const maxRetries = 2;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        const thinkingLevel = ThinkingLevel.LOW;
+        const thinkingLevel =
+          model === 'gemini-3.1-flash-lite' ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW;
         return await ai.models.generateContent({
           model,
           contents: {
@@ -291,7 +275,7 @@ async function generateOcrWithModelFallback(
                 },
               },
               {
-                text: `Hãy trích xuất toàn bộ nội dung trang ${pageNumber} theo đúng schema JSON, tách chuẩn công thức LaTeX, tọa độ vị trí box_2d chính xác, và giữ đúng 100% định dạng in đậm (bold), in nghiêng (italic), gạch chân (underline), màu chữ (#RRGGBB) và căn lề/thụt lề theo đúng trang PDF gốc.`,
+                text: `OCR trang ${pageNumber} sang JSON đúng schema: chuẩn công thức LaTeX, box_2d chính xác, giữ đúng bold/italic/underline/color(#RRGGBB)/căn lề như ảnh gốc.`,
               },
             ],
           },
@@ -312,7 +296,8 @@ async function generateOcrWithModelFallback(
             break;
           }
           if (attempt < maxRetries) {
-            await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+            const jitter = Math.round(Math.random() * 450);
+            await new Promise((r) => setTimeout(r, 500 * (attempt + 1) + jitter));
             continue;
           }
           break;
@@ -320,7 +305,8 @@ async function generateOcrWithModelFallback(
 
         if (isTransientServerError(err, msg)) {
           if (attempt < maxRetries) {
-            await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+            const jitter = Math.round(Math.random() * 450);
+            await new Promise((r) => setTimeout(r, 500 * (attempt + 1) + jitter));
             continue;
           }
           // Exhausted retries on this model -> break to try the next fallback model
@@ -394,6 +380,17 @@ export async function handleOcrPage(req: RequestWithOptionalBody, res: ServerRes
 
     const mimeType = match[1];
     const base64Data = match[2];
+    const resolvedSpeedMode = speedMode === 'fast' ? 'fast' : 'accurate';
+    const cacheKey = `${resolvedSpeedMode}:${createHash('sha256').update(base64Data).digest('hex')}`;
+    const cachedBlocks = ocrResultCache.get(cacheKey);
+    if (cachedBlocks) {
+      sendJson(res, 200, {
+        pageNumber: pageNumber ?? 1,
+        blocks: cachedBlocks,
+      });
+      return;
+    }
+
     const ai = getGeminiClient();
 
     const response = await generateOcrWithModelFallback(
@@ -401,7 +398,7 @@ export async function handleOcrPage(req: RequestWithOptionalBody, res: ServerRes
       mimeType,
       base64Data,
       pageNumber ?? 1,
-      speedMode === 'fast' ? 'fast' : 'accurate'
+      resolvedSpeedMode
     );
 
     const rawJson = (response.text ?? '{"blocks":[]}').trim();
@@ -410,9 +407,19 @@ export async function handleOcrPage(req: RequestWithOptionalBody, res: ServerRes
     const [normalizedPage] = normalizePagesInlineMath([
       { pageNumber: pageNumber ?? 1, blocks: rawBlocks },
     ]);
+    const finalBlocks = normalizedPage?.blocks ?? rawBlocks;
+
+    if (finalBlocks.length > 0) {
+      if (ocrResultCache.size >= OCR_CACHE_MAX) {
+        const oldest = ocrResultCache.keys().next().value;
+        if (oldest !== undefined) ocrResultCache.delete(oldest);
+      }
+      ocrResultCache.set(cacheKey, finalBlocks);
+    }
+
     sendJson(res, 200, {
       pageNumber: pageNumber ?? 1,
-      blocks: normalizedPage?.blocks ?? rawBlocks,
+      blocks: finalBlocks,
     });
   } catch (err: unknown) {
     const message = getErrorMessage(err) || 'Lỗi không xác định khi gọi Gemini OCR.';
@@ -487,9 +494,10 @@ export async function handleExportDocx(req: RequestWithOptionalBody, res: Server
       addPageBreaks?: boolean;
       choiceLayout?: 'table' | 'tabs';
       mathFormat?: 'omml' | 'latex';
+      underlineCorrectChoice?: boolean;
     }>(req);
 
-    const { pages, filename, addPageBreaks, choiceLayout, mathFormat } = body;
+    const { pages, filename, addPageBreaks, choiceLayout, mathFormat, underlineCorrectChoice } = body;
 
     if (!Array.isArray(pages) || pages.length === 0) {
       sendJson(res, 400, { error: 'Chưa có dữ liệu trang đã OCR để xuất file Word.' });
@@ -502,6 +510,7 @@ export async function handleExportDocx(req: RequestWithOptionalBody, res: Server
       addPageBreaks: addPageBreaks !== false,
       choiceLayout: choiceLayout === 'table' ? 'table' : 'tabs',
       mathFormat: resolvedMathFormat,
+      underlineCorrectChoice: Boolean(underlineCorrectChoice),
     });
 
     const safeBase = (filename || 'tai_lieu_toan')

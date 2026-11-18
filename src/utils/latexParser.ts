@@ -4461,10 +4461,11 @@ function parseExEnvironment(
   }
 
   // Extract \choice[cols]{A}{B}{C}{D}, \choiceTF[cols]{A}{B}{C}{D}, \motcot{...}, \haicot{...}, \boncot{...}
-  const chMatch = /\\(choice(?:TF)?|motcot|haicot|boncot)\s*(?:\[\s*(\d+)\s*\])?\s*\{/.exec(remaining);
+  const chMatch = /\\(choice(?:TF)?|motcot|haicot|boncot)\s*(?:\[\s*([^\]]*)\s*\])?\s*\{/.exec(remaining);
   if (chMatch) {
     const cmdName = chMatch[1];
     const isTF = cmdName === 'choiceTF';
+    const numericColOpt = chMatch[2] && /^\d+$/.test(chMatch[2].trim()) ? parseInt(chMatch[2].trim(), 10) : null;
     const extracted = extractBalancedMacroArgs(
       remaining,
       chMatch.index + chMatch[0].length - 1,
@@ -4475,24 +4476,29 @@ function parseExEnvironment(
         remaining.slice(0, chMatch.index) + remaining.slice(extracted.endIdx)
       ).trim();
       const labels = isTF ? ['a)', 'b)', 'c)', 'd)'] : ['A.', 'B.', 'C.', 'D.'];
-      const colHint = chMatch[2]
-        ? parseInt(chMatch[2], 10)
+      const colHint = numericColOpt
+        ? numericColOpt
         : isTF || cmdName === 'motcot'
         ? 1
         : cmdName === 'haicot'
         ? 2
         : 4;
       const explicitColOverride = Boolean(
-        chMatch[2] || cmdName === 'motcot' || cmdName === 'haicot' || cmdName === 'boncot' || isTF
+        numericColOpt || cmdName === 'motcot' || cmdName === 'haicot' || cmdName === 'boncot' || isTF
       );
-      const cells: TableCellData[] = extracted.args.map((arg, idx) => ({
-        segments: [
-          { type: 'text', content: `${labels[idx]} `, bold: true },
-          ...parseInlineSegmentText(arg.replace(/\\True\b/g, '').trim(), {}, mode, ctx),
-        ],
-        alignment: 'left',
-        width_pct: colHint === 1 ? 100 : colHint === 2 ? 50 : 25,
-      }));
+      const cells: TableCellData[] = extracted.args.map((arg, idx) => {
+        const isCorrect = /\\True(?![a-zA-Z])/.test(arg);
+        const cleanedArg = arg.replace(/\\True(?![a-zA-Z])\s*/g, '').trim();
+        return {
+          segments: [
+            { type: 'text', content: `${labels[idx]} `, bold: true },
+            ...parseInlineSegmentText(cleanedArg, {}, mode, ctx),
+          ],
+          alignment: 'left',
+          width_pct: colHint === 1 ? 100 : colHint === 2 ? 50 : 25,
+          ...(isCorrect ? { is_correct: true } : {}),
+        };
+      });
       const rows: TableCellData[][] =
         colHint === 1
           ? cells.map((c) => [c])

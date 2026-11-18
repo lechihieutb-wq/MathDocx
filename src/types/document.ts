@@ -6,6 +6,8 @@ export type MathOutputFormat = 'omml' | 'latex';
 
 export type OcrSpeedMode = 'fast' | 'accurate';
 
+export type LatexExportFormat = 'auto' | 'basic' | 'ex_test';
+
 export interface TabStopSpec {
   pos_pt?: number | null;
   align: 'left' | 'center' | 'right';
@@ -42,6 +44,7 @@ export interface TableCellData {
   border_right?: boolean | null;
   border_color?: string | null;
   fill_color?: string | null;
+  is_correct?: boolean;
 }
 
 export interface DocumentBlock {
