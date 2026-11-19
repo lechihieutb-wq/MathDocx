@@ -1212,11 +1212,8 @@ export default function App() {
         setStatusMessage(`Đã nhận dạng xong ${completedCount}/${total} trang...`);
       };
 
-      const concurrency = Math.min(5, total);
-      const workers = Array.from({ length: concurrency }, async (_, workerIdx) => {
-        if (workerIdx > 0) {
-          await new Promise((r) => setTimeout(r, workerIdx * 90));
-        }
+      const concurrency = Math.min(2, total);
+      const workers = Array.from({ length: concurrency }, async () => {
         while (!abortedError) {
           const idx = nextIndex++;
           if (idx >= total) break;
@@ -1289,44 +1286,39 @@ export default function App() {
           : 'Đang đóng gói tệp Word (.docx) với Equation OMML...'
       );
 
-      if (eqQueries.length > 0) {
-        void fetchWithRetry(
-          '/api/omml/preview',
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ equations: eqQueries }),
-          },
-          1
-        )
-          .then(async (ommlRes) => {
-            if (!ommlRes.ok) return;
-            const ommlJson = (await ommlRes.json()) as {
-              results: Array<{ latex: string; isDisplay: boolean; omml: string }>;
-            };
-            const map: Record<string, string> = {};
-            for (const item of ommlJson.results) {
-              map[`${item.isDisplay ? 'D' : 'I'}:${item.latex}`] = item.omml;
-            }
-            setOmmlMap(map);
-          })
-          .catch(() => undefined);
-      }
+      const ommlPreviewPromise =
+        eqQueries.length > 0
+          ? fetchWithRetry(
+              '/api/omml/preview',
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ equations: eqQueries }),
+              },
+              1
+            )
+              .then(async (ommlRes) => {
+                if (!ommlRes.ok) return;
+                const ommlJson = (await ommlRes.json()) as {
+                  results: Array<{ latex: string; isDisplay: boolean; omml: string }>;
+                };
+                const map: Record<string, string> = {};
+                for (const item of ommlJson.results) {
+                  map[`${item.isDisplay ? 'D' : 'I'}:${item.latex}`] = item.omml;
+                }
+                setOmmlMap(map);
+              })
+              .catch(() => undefined)
+          : Promise.resolve();
 
-      const docxPromise = rebuildDocxExport(
-        finalPages,
-        sourceFilename,
-        addPageBreaks,
-        choiceLayout,
-        mathFormat
-      );
+      await Promise.all([
+        ommlPreviewPromise,
+        rebuildDocxExport(finalPages, sourceFilename, addPageBreaks, choiceLayout, mathFormat),
+      ]);
 
-      // Overlap client-side LaTeX source generation while server builds the .docx file
       const { latex: generatedLatex, assets: generatedAssets } = pagesToLatexSource(finalPages);
       setFigureAssets(generatedAssets);
       setPastedLatex(generatedLatex);
-
-      await docxPromise;
 
       setProgressPct(100);
       setStatusMessage('Hoàn tất chuyển đổi! File Word đã sẵn sàng để tải xuống.');

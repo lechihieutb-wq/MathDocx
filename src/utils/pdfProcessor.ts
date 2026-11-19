@@ -6,17 +6,17 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 function encodeJpegWithCap(
   canvas: HTMLCanvasElement,
-  maxBytes = 950_000
+  maxBytes = 2_300_000
 ): string {
-  const qualities = [0.80, 0.72, 0.62];
+  const qualities = [0.90, 0.82, 0.72, 0.60];
   for (const q of qualities) {
     const url = canvas.toDataURL('image/jpeg', q);
     if (url.length <= maxBytes) return url;
   }
-  return canvas.toDataURL('image/jpeg', 0.52);
+  return canvas.toDataURL('image/jpeg', 0.50);
 }
 
-function createOcrDataUrl(sourceCanvas: HTMLCanvasElement, maxDim = 1536): string {
+function createOcrDataUrl(sourceCanvas: HTMLCanvasElement, maxDim = 2000): string {
   const w = sourceCanvas.width;
   const h = sourceCanvas.height;
   if (w <= maxDim && h <= maxDim) {
@@ -49,59 +49,47 @@ export async function loadFileAsPages(file: File, dpi = 250): Promise<RenderedPa
     const arrayBuffer = await file.arrayBuffer();
     const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
     const pdf = await loadingTask.promise;
-    const totalPages = pdf.numPages;
-    const pages: Array<RenderedPage | undefined> = new Array(totalPages);
+    const pages: RenderedPage[] = [];
     const scale = dpi / 72;
-    const renderConcurrency = Math.min(4, totalPages);
-    let nextPageNum = 1;
 
-    const renderWorker = async () => {
-      while (true) {
-        const pageNum = nextPageNum++;
-        if (pageNum > totalPages) break;
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+      const page = await pdf.getPage(pageNum);
+      const viewport = page.getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(viewport.width);
+      canvas.height = Math.round(viewport.height);
 
-        const page = await pdf.getPage(pageNum);
-        const viewport = page.getViewport({ scale });
-        const canvas = document.createElement('canvas');
-        canvas.width = Math.round(viewport.width);
-        canvas.height = Math.round(viewport.height);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) continue;
 
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          page.cleanup();
-          continue;
-        }
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({
+        canvasContext: ctx,
+        viewport,
+        canvas,
+      }).promise;
 
-        await page.render({
-          canvasContext: ctx,
-          viewport,
-          canvas,
-        }).promise;
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.93);
+      const ocrDataUrl = createOcrDataUrl(canvas);
+      const pageW = canvas.width;
+      const pageH = canvas.height;
 
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.90);
-        const ocrDataUrl = createOcrDataUrl(canvas);
-        const pageW = canvas.width;
-        const pageH = canvas.height;
+      canvas.width = 0;
+      canvas.height = 0;
+      page.cleanup();
 
-        canvas.width = 0;
-        canvas.height = 0;
-        page.cleanup();
+      pages.push({
+        pageNumber: pageNum,
+        dataUrl,
+        ocrDataUrl,
+        width: pageW,
+        height: pageH,
+      });
+    }
 
-        pages[pageNum - 1] = {
-          pageNumber: pageNum,
-          dataUrl,
-          ocrDataUrl,
-          width: pageW,
-          height: pageH,
-        };
-      }
-    };
-
-    await Promise.all(Array.from({ length: renderConcurrency }, () => renderWorker()));
-    return pages.filter((p): p is RenderedPage => Boolean(p));
+    return pages;
   }
 
   // Handle single image file (PNG / JPG / JPEG)
