@@ -1086,6 +1086,22 @@ export default function App() {
     setActiveTab('original');
   };
 
+  const handleClearSelectedFile = useCallback(() => {
+    resetResults();
+    setSourceFilename('');
+    setRenderedPages([]);
+    setSelectedPageNum(1);
+    setPendingDocxPages([]);
+    setPastedLatex('');
+    setFigureAssets({});
+    setInputSource('file');
+    setDocxFileName('tai_lieu_toan.docx');
+    setActiveTab('preview');
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  }, [resetResults]);
+
   const handleStartConversion = async () => {
     const hasFile = renderedPages.length > 0;
     const hasDocx = pendingDocxPages.length > 0;
@@ -1825,7 +1841,7 @@ export default function App() {
                 </div>
               ) : (
                 <>
-                  <div className="flex items-center gap-2 min-w-0">
+                  <div className="flex items-center gap-2 min-w-0 flex-1">
                     <Upload className="w-4 h-4 text-slate-500 shrink-0" />
                     <div className="min-w-0">
                       <div className="text-xs font-medium text-slate-800 truncate">
@@ -1840,6 +1856,21 @@ export default function App() {
                       </div>
                     </div>
                   </div>
+                  {(sourceFilename || renderedPages.length > 0 || pendingDocxPages.length > 0) && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleClearSelectedFile();
+                      }}
+                      disabled={isConverting || isLoadingFile}
+                      title="Tắt file đang chọn"
+                      aria-label="Tắt file đang chọn"
+                      className="p-1 rounded-md text-slate-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-50 transition-colors shrink-0 cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
                 </>
               )}
             </div>
@@ -2468,6 +2499,16 @@ export default function App() {
                         + Dán thêm trang ảnh
                       </button>
                     )}
+                    <button
+                      type="button"
+                      onClick={handleClearSelectedFile}
+                      disabled={isConverting || isLoadingFile}
+                      title="Tắt file đang chọn"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 disabled:opacity-50 rounded-lg transition-colors cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                      Tắt file
+                    </button>
                   </div>
                 </section>
                 {activeTab === 'original' ? (
