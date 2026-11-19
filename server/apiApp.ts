@@ -59,7 +59,7 @@ const inlineSegmentSchema = {
     color: {
       type: Type.STRING,
       description:
-        '6-digit hex color like #DC2626 or #1D4ED8 whenever the text/symbol/math color in the PDF is NOT black/dark-gray. Omit for black text.',
+        'Exact 6-digit hex color "#RRGGBB" matching the true ink color on the page (e.g. #FF0000 pure red, #C00000 dark red, #0000FF pure blue, #0070C0 Office blue, #002060 navy, #008000 green, #7030A0 purple, #E36C0A orange) whenever the text/symbol/math is NOT black. Omit for black ink.',
     },
     tab_before: {
       type: Type.BOOLEAN,
@@ -120,6 +120,16 @@ const pageExtractionSchema = {
           latex: {
             type: Type.STRING,
             description: 'Pure LaTeX for standalone display equation (without $$).',
+          },
+          bold: {
+            type: Type.BOOLEAN,
+            description:
+              'For block_type="equation" only: true ONLY if the entire standalone equation is visually boldface.',
+          },
+          color: {
+            type: Type.STRING,
+            description:
+              'For block_type="equation" only: exact 6-digit hex color "#RRGGBB" if the standalone equation is colored (not black). Omit for black.',
           },
           table_borderless: {
             type: Type.BOOLEAN,
@@ -196,12 +206,14 @@ Quy tắc bắt buộc:
    - BẮT BUỘC trả về box_2d=[ymin, xmin, ymax, xmax] trên thang chuẩn hóa 0..1000 cho MỌI khối (heading, paragraph, equation, table, figure, horizontal_rule).
    - Hệ thống dùng box_2d để tính chính xác lề trang, khoảng cách dọc giữa các đoạn, vị trí thụt lề ngang, độ rộng hình vẽ và bố cục đặt cạnh nhau (ví dụ: đề bài bên trái, hình vẽ bên phải).
 2. ĐỊNH DẠNG IN ĐẬM / IN NGHIÊNG / GẠCH CHÂN / CỠ CHỮ / MÀU SẮC (ĐÚNG 100% THEO TRANG PDF GỐC):
-   - IN ĐẬM (bold): Quan sát thật kỹ độ dày nét chữ (stroke weight) trên ảnh PDF. CHỈ đặt bold=true cho các từ/cụm từ THỰC SỰ IN ĐẬM (nét chữ dày đậm rõ rệt hơn văn bản thường). MỌI chữ có nét mảnh/bình thường — kể cả tiêu đề phụ, dòng căn giữa, dòng cỡ chữ lớn hơn, chữ in nghiêng, ghi chú trong ngoặc, hàng tiêu đề bảng không in đậm, phần đề bài sau "Câu 1.", hoặc nội dung đáp án sau "A.", "B.", "C.", "D." — TUYỆT ĐỐI KHÔNG được gán bold=true (bắt buộc bỏ qua hoặc để bold=false).
+   - IN ĐẬM (bold): Quan sát thật kỹ độ dày nét chữ (stroke weight) của TỪNG TỪ, TỪNG SỐ và TỪNG Ô BẢNG trên ảnh PDF. CHỈ đặt bold=true khi nét chữ thực sự dày đậm rõ rệt hơn văn bản thường. MỌI chữ/số có nét mảnh bình thường — kể cả tiêu đề phụ, dòng căn giữa, dòng cỡ chữ lớn hơn, chữ in nghiêng, ghi chú trong ngoặc, hàng tiêu đề bảng không in đậm, cột điểm số (như "1,0", "0,25", "0,5" nằm cùng hàng với "Bài 1" in đậm), phần đề bài sau "Câu 1.", hoặc nội dung đáp án sau "A.", "B.", "C.", "D." — TUYỆT ĐỐI KHÔNG được gán bold=true (bắt buộc bỏ qua hoặc để bold=false). TUYỆT ĐỐI KHÔNG để trạng thái bold=true của ô cột 1 (ví dụ "Bài 1") lây lan sang ô cột 2 hoặc cột 3 ("1,0") trên cùng hàng! Ngược lại, mọi chữ thực sự in đậm (nhãn "Câu 1.", "Bài 1", "PHẦN I", tiêu đề đậm, từ nhấn mạnh đậm) BẮT BUỘC phải giữ đúng bold=true.
    - IN NGHIÊNG (italic): Quan sát kỹ độ nghiêng nét chữ trên ảnh PDF. BẮT BUỘC đặt italic=true cho MỌI từ/cụm từ/ghi chú/tiêu đề phụ/câu trích dẫn thực sự in nghiêng trên PDF (ví dụ: "(Đề gồm 04 trang)", "(Thí sinh không được sử dụng tài liệu)", "Hướng dẫn giải", "Chú ý:", chữ nghiêng xen giữa câu). Nếu chữ vừa đậm vừa nghiêng -> đặt CẢ bold=true và italic=true; nếu chỉ nghiêng nét mảnh -> CHỈ đặt italic=true, TUYỆT ĐỐI KHÔNG đặt bold=true.
    - GẠCH CHÂN (underline): Đặt underline=true cho mọi chữ có đường gạch chân bên dưới.
-   - MÀU SẮC CHỮ (color): Quan sát kỹ màu mực thực tế của từng chữ, nhãn câu, tiêu đề, công thức và ô bảng trên PDF! Với chữ màu đen bình thường thì bỏ qua trường color. Với BẤT KỲ chữ/số/công thức nào có màu khác đen (đỏ, xanh dương, xanh lá, tím, cam, nâu, xám nhạt...): BẮT BUỘC gán đúng mã màu hex 6 ký tự dạng "#RRGGBB" (ví dụ: đỏ "#DC2626" hoặc "#FF0000", xanh dương "#1D4ED8" hoặc "#0000FF", xanh lá "#15803D", tím "#7C3AED", cam "#EA580C"). Không được bỏ sót chữ có màu!
+   - MÀU SẮC CHỮ (color): Quan sát thật kỹ ĐÚNG SẮC ĐỘ MÀU MỰC THỰC TẾ của từng chữ, nhãn câu, tiêu đề, công thức (cả inline math lẫn block_type="equation") và từng ô bảng trên PDF!
+     + Với chữ màu đen thực sự: bỏ qua trường color (không tự ý đổi sang màu xanh hay xám).
+     + Với BẤT KỲ chữ/số/công thức nào có màu khác đen: BẮT BUỘC lấy ĐÚNG mã màu hex 6 ký tự "#RRGGBB" gần sát nhất với màu mực thực tế trên ảnh (KHÔNG tự ý làm nhạt hoặc đổi tông màu): đỏ tươi "#FF0000", đỏ đậm/đỏ đô "#C00000" hoặc "#990000", xanh dương thuần "#0000FF", xanh dương Word "#0070C0", xanh đậm/navy "#002060", xanh lá "#008000" hoặc "#00B050", tím "#7030A0", cam "#E36C0A" hoặc "#FF6600", nâu "#804000", xám "#666666". Không được bỏ sót màu của chữ hoặc công thức, và không được gán màu cho chữ màu đen!
    - BẮT BUỘC tách thành các segment riêng NGAY TẠI ranh giới đổi định dạng (đổi đậm/thường, đứng/nghiêng, gạch chân, đổi màu, đổi cỡ chữ) trên cùng một dòng! Ví dụ:
-     + "Câu 1. Cho hàm số..." -> segment 1 ("Câu 1. ", bold: true, kèm color nếu Câu 1. có màu), segment 2 ("Cho hàm số...", bold: false).
+     + "Câu 1. Cho hàm số..." -> segment 1 ("Câu 1. ", bold: true, kèm đúng color nếu Câu 1. có màu), segment 2 ("Cho hàm số...", bold: false).
      + "A. x = 2" -> nếu chỉ "A." in đậm thì tách segment 1 ("A. ", bold: true) và segment 2 (math "x = 2"); nếu "A." không in đậm thì KHÔNG gán bold=true.
      + Trong block heading hoặc ô bảng is_header=true: hệ thống KHÔNG tự động tô đậm. Chỉ segment nào thực sự in đậm trên PDF mới đặt bold=true; segment nét thường hoặc chỉ in nghiêng phải để bold=false.
 3. VỊ TRÍ CHỮ, CĂN LỀ, THỤT ĐẦU DÒNG & BỐ CỤC NHIỀU CỘT (CHÍNH XÁC 100%):

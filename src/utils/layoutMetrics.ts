@@ -1336,14 +1336,16 @@ function computeBlockHorizontalOffsets(
     (blk.alignment === 'left' || blk.alignment === 'justify' || blk.block_type === 'horizontal_rule')
   ) {
     const rawOffset = (box[1] / 1000) * geom.pageWidthPt - geom.marginLeftPt;
-    if (rawOffset > 6) {
+    if (rawOffset > 3) {
       indentLeftPt = clamp(rawOffset, 0, geom.contentWidthPt * 0.65);
     }
   }
 
-  if (box && (blk.alignment === 'right' || blk.block_type === 'horizontal_rule')) {
+  if (typeof blk.indent_right_pt === 'number' && Number.isFinite(blk.indent_right_pt)) {
+    indentRightPt = clamp(blk.indent_right_pt, 0, geom.contentWidthPt * 0.65);
+  } else if (box && (blk.alignment === 'right' || blk.block_type === 'horizontal_rule')) {
     const rawRight = geom.pageWidthPt - geom.marginRightPt - (box[3] / 1000) * geom.pageWidthPt;
-    if (rawRight > 6) {
+    if (rawRight > 3) {
       indentRightPt = clamp(rawRight, 0, geom.contentWidthPt * 0.65);
     }
   }
@@ -1352,8 +1354,8 @@ function computeBlockHorizontalOffsets(
   if (typeof blk.first_line_indent_pt === 'number' && Number.isFinite(blk.first_line_indent_pt)) {
     if (blk.first_line_indent_pt < 0) {
       firstLineIndentPt = clamp(blk.first_line_indent_pt, -72, 0);
-    } else if (indentLeftPt <= 6) {
-      firstLineIndentPt = clamp(blk.first_line_indent_pt, 0, 72);
+    } else {
+      firstLineIndentPt = clamp(blk.first_line_indent_pt, 0, 120);
     }
   }
 
@@ -1504,36 +1506,41 @@ export function groupBlocksIntoVisualBands(
 }
 
 const NAMED_HEX_COLORS: Record<string, string> = {
-  red: 'DC2626',
+  red: 'FF0000',
   crimson: 'DC143C',
-  darkred: '991B1B',
+  darkred: '8B0000',
   maroon: '800000',
-  blue: '2563EB',
-  darkblue: '1E3A8A',
-  navy: '1E3A8A',
-  royalblue: '1D4ED8',
+  blue: '0000FF',
+  darkblue: '00008B',
+  navy: '000080',
+  royalblue: '4169E1',
   dodgerblue: '1E90FF',
-  green: '16A34A',
-  darkgreen: '15803D',
-  forestgreen: '15803D',
+  green: '008000',
+  darkgreen: '006400',
+  forestgreen: '228B22',
   emerald: '059669',
-  teal: '0D9488',
-  cyan: '0891B2',
-  orange: 'EA580C',
-  darkorange: 'C2410C',
+  teal: '008080',
+  cyan: '00FFFF',
+  orange: 'FF8000',
+  darkorange: 'FF8C00',
   amber: 'D97706',
-  gold: 'CA8A04',
-  yellow: 'CA8A04',
-  purple: '9333EA',
-  violet: '7C3AED',
-  indigo: '4338CA',
-  magenta: 'DB2777',
-  pink: 'EC4899',
-  brown: '92400E',
-  gray: '64748B',
-  grey: '64748B',
-  darkgray: '475569',
-  darkgrey: '475569',
+  gold: 'FFD700',
+  yellow: 'FFFF00',
+  purple: '800080',
+  violet: '800080',
+  indigo: '4B0082',
+  magenta: 'FF00FF',
+  pink: 'FFC0CB',
+  brown: '804000',
+  olive: '808000',
+  lime: '00FF00',
+  gray: '808080',
+  grey: '808080',
+  darkgray: '404040',
+  darkgrey: '404040',
+  lightgray: 'C0C0C0',
+  lightgrey: 'C0C0C0',
+  silver: 'C0C0C0',
 };
 
 export function normalizeHexColor(color?: string | null): string | null {
@@ -1542,6 +1549,7 @@ export function normalizeHexColor(color?: string | null): string | null {
   if (!raw) return null;
 
   const lower = raw.toLowerCase();
+  if (lower === 'black' || lower === 'auto') return null;
   if (NAMED_HEX_COLORS[lower]) {
     return NAMED_HEX_COLORS[lower];
   }
@@ -1552,7 +1560,7 @@ export function normalizeHexColor(color?: string | null): string | null {
     const g = Math.max(0, Math.min(255, Number(rgbMatch[2])));
     const b = Math.max(0, Math.min(255, Number(rgbMatch[3])));
     const hex = [r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('').toUpperCase();
-    if (hex === '000000' || hex === '0F172A' || hex === '111827') return null;
+    if (hex === '000000') return null;
     return hex;
   }
 
@@ -1566,7 +1574,7 @@ export function normalizeHexColor(color?: string | null): string | null {
     return expanded;
   }
   if (!/^[0-9A-F]{6}$/.test(cleaned)) return null;
-  if (cleaned === '000000' || cleaned === '0F172A' || cleaned === '111827') return null;
+  if (cleaned === '000000') return null;
   return cleaned;
 }
 
@@ -1584,7 +1592,7 @@ export function normalizeBoxHexColor(color?: string | null): string | null {
   }
   const lower = raw.toLowerCase();
   if (lower === 'white') return 'FFFFFF';
-  if (lower === 'black') return '0F172A';
+  if (lower === 'black') return '000000';
   if (NAMED_HEX_COLORS[lower]) return NAMED_HEX_COLORS[lower];
   return null;
 }

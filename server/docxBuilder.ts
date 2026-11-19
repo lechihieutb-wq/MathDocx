@@ -78,14 +78,22 @@ function renderRunXml(
     colorHex = null,
   } = options;
   const sz = finiteInt(sizeHalfPt, 24, 14, 96);
-  const safeColor = colorHex && /^[0-9A-Fa-f]{6}$/.test(colorHex) ? colorHex.toUpperCase() : null;
-  // Strict ECMA-376 CT_RPr order: rFonts -> b -> i -> color -> sz -> szCs -> u
+  const safeColor = colorHex && /^[0-9A-Fa-f]{6}$/.test(colorHex) ? colorHex.toUpperCase() : '000000';
+  // Strict ECMA-376 CT_RPr order: rFonts -> b -> bCs -> i -> iCs -> color -> sz -> szCs -> u
   const rPrParts = [
     '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman" w:eastAsia="Times New Roman"/>',
   ];
-  if (bold) rPrParts.push('<w:b/>');
-  if (italic) rPrParts.push('<w:i/>');
-  if (safeColor) rPrParts.push(`<w:color w:val="${safeColor}"/>`);
+  if (bold) {
+    rPrParts.push('<w:b/>', '<w:bCs/>');
+  } else {
+    rPrParts.push('<w:b w:val="0"/>', '<w:bCs w:val="0"/>');
+  }
+  if (italic) {
+    rPrParts.push('<w:i/>', '<w:iCs/>');
+  } else {
+    rPrParts.push('<w:i w:val="0"/>', '<w:iCs w:val="0"/>');
+  }
+  rPrParts.push(`<w:color w:val="${safeColor}"/>`);
   rPrParts.push(`<w:sz w:val="${sz}"/>`, `<w:szCs w:val="${sz}"/>`);
   if (underline) rPrParts.push('<w:u w:val="single"/>');
 
@@ -505,7 +513,11 @@ function renderTableXml(
     ? '<w:tblCellMar><w:top w:w="20" w:type="dxa"/><w:left w:w="40" w:type="dxa"/><w:bottom w:w="20" w:type="dxa"/><w:right w:w="40" w:type="dxa"/></w:tblCellMar>'
     : '<w:tblCellMar><w:top w:w="70" w:type="dxa"/><w:left w:w="100" w:type="dxa"/><w:bottom w:w="70" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tblCellMar>';
 
-  const tblPr = `<w:tblPr><w:tblW w:w="${resolvedTableWidthDxa}" w:type="dxa"/>${tblIndXml}${bordersXml}<w:tblLayout w:type="fixed"/>${cellMarXml}</w:tblPr>`;
+  const tblJcXml =
+    safeIndentLeft <= 20 && (normalizedBlock.alignment === 'center' || normalizedBlock.alignment === 'right')
+      ? `<w:jc w:val="${normalizedBlock.alignment}"/>`
+      : '';
+  const tblPr = `<w:tblPr><w:tblW w:w="${resolvedTableWidthDxa}" w:type="dxa"/>${tblJcXml}${tblIndXml}${bordersXml}<w:tblLayout w:type="fixed"/>${cellMarXml}</w:tblPr>`;
 
   const defaultSizeHalfPt =
     typeof block.font_size_pt === 'number' && Number.isFinite(block.font_size_pt)
@@ -861,21 +873,37 @@ function renderSingleBlockXml(
   if (blk.block_type === 'equation' && blk.latex) {
     const sizeHalfPt = getBlockSizeHalfPt(blk, pageBaseFontPt);
     const eqAlign = blk.alignment ?? 'center';
+    const eqColorHex = normalizeHexColor(blk.color);
+    const eqBold = Boolean(blk.bold);
+    const eqItalic = Boolean(blk.italic);
     if (mathFormat === 'latex') {
       let cleaned = cleanLatex(blk.latex);
       const eqEnvM = cleaned.match(/^\\begin\{(equation\*?|displaymath)\}([\s\S]*)\\end\{\1\}$/);
       if (eqEnvM) cleaned = eqEnvM[2].trim();
-      return renderParagraphXml(cleaned ? renderRunXml('${' + cleaned + '}$', { sizeHalfPt }) : '', {
-        align: eqAlign,
-        spaceBeforeTwip,
-        spaceAfterTwip: 0,
-        indentLeftTwip: eqAlign === 'center' ? 0 : indentLeftTwip,
-        indentRightTwip: eqAlign === 'center' ? 0 : indentRightTwip,
-      });
+      return renderParagraphXml(
+        cleaned
+          ? renderRunXml('${' + cleaned + '}$', {
+              sizeHalfPt,
+              colorHex: eqColorHex,
+              bold: eqBold,
+              italic: eqItalic,
+            })
+          : '',
+        {
+          align: eqAlign,
+          spaceBeforeTwip,
+          spaceAfterTwip: 0,
+          indentLeftTwip: eqAlign === 'center' ? 0 : indentLeftTwip,
+          indentRightTwip: eqAlign === 'center' ? 0 : indentRightTwip,
+        }
+      );
     }
     const omml = latexToOmmlXml(blk.latex, true, {
       sizeHalfPt,
       align: eqAlign,
+      colorHex: eqColorHex,
+      bold: eqBold,
+      italic: eqItalic,
     });
     if (omml) {
       return renderParagraphXml(omml, {
@@ -886,12 +914,21 @@ function renderSingleBlockXml(
         indentRightTwip: eqAlign === 'center' ? 0 : indentRightTwip,
       });
     }
-    return renderParagraphXml(renderRunXml(cleanLatex(blk.latex), { sizeHalfPt }), {
-      align: eqAlign,
-      spaceBeforeTwip,
-      spaceAfterTwip: 0,
-      indentLeftTwip: eqAlign === 'center' ? 0 : indentLeftTwip,
-    });
+    return renderParagraphXml(
+      renderRunXml(cleanLatex(blk.latex), {
+        sizeHalfPt,
+        colorHex: eqColorHex,
+        bold: eqBold,
+        italic: eqItalic,
+      }),
+      {
+        align: eqAlign,
+        spaceBeforeTwip,
+        spaceAfterTwip: 0,
+        indentLeftTwip: eqAlign === 'center' ? 0 : indentLeftTwip,
+        indentRightTwip: eqAlign === 'center' ? 0 : indentRightTwip,
+      }
+    );
   }
 
   if (blk.block_type === 'table') {
@@ -1162,6 +1199,11 @@ export async function buildDocxBuffer(
     <w:rPrDefault>
       <w:rPr>
         <w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman" w:eastAsia="Times New Roman"/>
+        <w:b w:val="0"/>
+        <w:bCs w:val="0"/>
+        <w:i w:val="0"/>
+        <w:iCs w:val="0"/>
+        <w:color w:val="000000"/>
         <w:sz w:val="${defaultStyleHalfPt}"/>
         <w:szCs w:val="${defaultStyleHalfPt}"/>
       </w:rPr>

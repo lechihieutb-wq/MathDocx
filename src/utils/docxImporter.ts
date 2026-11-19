@@ -569,34 +569,371 @@ function splitInlineLatexFromRun(
   return splitTextPreservingInlineMath(text, baseStyle);
 }
 
-function parseRunFormatting(rEl: Element): Omit<InlineSegment, 'type' | 'content'> {
-  const rPr = getFirstChild(rEl, 'rPr');
-  if (!rPr) return {};
+interface ResolvedRunProps {
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  font_size_pt?: number;
+  color?: string | null;
+}
 
-  const style: Omit<InlineSegment, 'type' | 'content'> = {};
+interface DocxStyleContext {
+  themeColors: Map<string, string>;
+  docDefaultRun: ResolvedRunProps;
+  paragraphStyles: Map<string, { basedOn?: string; rPr: ResolvedRunProps; alignment?: BlockAlignment }>;
+  characterStyles: Map<string, { basedOn?: string; rPr: ResolvedRunProps }>;
+  tableStyles: Map<string, { rPr: ResolvedRunProps; firstRowRPr: ResolvedRunProps }>;
+}
+
+const DEFAULT_OFFICE_THEME_COLORS: Record<string, string> = {
+  dk1: '000000',
+  lt1: 'FFFFFF',
+  dk2: '44546A',
+  lt2: 'E7E6E6',
+  tx1: '000000',
+  bg1: 'FFFFFF',
+  tx2: '44546A',
+  bg2: 'E7E6E6',
+  accent1: '4472C4',
+  accent2: 'ED7D31',
+  accent3: 'A5A5A5',
+  accent4: 'FFC000',
+  accent5: '5B9BD5',
+  accent6: '70AD47',
+  hlink: '0563C1',
+  folHlink: '954F72',
+  dark1: '000000',
+  light1: 'FFFFFF',
+  dark2: '44546A',
+  light2: 'E7E6E6',
+  text1: '000000',
+  background1: 'FFFFFF',
+  text2: '44546A',
+  background2: 'E7E6E6',
+  hyperlink: '0563C1',
+  followedHyperlink: '954F72',
+};
+
+function applyThemeTintShade(hex6: string, tintHex?: string | null, shadeHex?: string | null): string {
+  const clean = hex6.replace(/^#/, '');
+  if (!/^[0-9A-Fa-f]{6}$/.test(clean)) return hex6;
+  let r = parseInt(clean.slice(0, 2), 16);
+  let g = parseInt(clean.slice(2, 4), 16);
+  let b = parseInt(clean.slice(4, 6), 16);
+
+  if (tintHex && /^[0-9A-Fa-f]{2}$/.test(tintHex)) {
+    const t = parseInt(tintHex, 16) / 255;
+    r = Math.round(r * t + 255 * (1 - t));
+    g = Math.round(g * t + 255 * (1 - t));
+    b = Math.round(b * t + 255 * (1 - t));
+  }
+  if (shadeHex && /^[0-9A-Fa-f]{2}$/.test(shadeHex)) {
+    const s = parseInt(shadeHex, 16) / 255;
+    r = Math.round(r * s);
+    g = Math.round(g * s);
+    b = Math.round(b * s);
+  }
+  return [r, g, b]
+    .map((v) => Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0').toUpperCase())
+    .join('');
+}
+
+function parseThemeColors(themeXml: Document | null): Map<string, string> {
+  const map = new Map<string, string>(Object.entries(DEFAULT_OFFICE_THEME_COLORS));
+  if (!themeXml) return map;
+
+  const clrScheme = Array.from(themeXml.getElementsByTagName('*')).find(
+    (el) => getLocalName(el) === 'clrScheme'
+  );
+  if (!clrScheme) return map;
+
+  for (const child of getChildElements(clrScheme)) {
+    const name = getLocalName(child);
+    const srgb = getFirstChild(child, 'srgbClr');
+    const sys = getFirstChild(child, 'sysClr');
+    const val = (srgb && getAttr(srgb, 'val')) || (sys && (getAttr(sys, 'lastClr') || getAttr(sys, 'val')));
+    if (val && /^[0-9A-Fa-f]{6}$/.test(val)) {
+      const upper = val.toUpperCase();
+      map.set(name, upper);
+      if (name === 'dk1') {
+        map.set('tx1', upper);
+        map.set('dark1', upper);
+        map.set('text1', upper);
+      } else if (name === 'lt1') {
+        map.set('bg1', upper);
+        map.set('light1', upper);
+        map.set('background1', upper);
+      } else if (name === 'dk2') {
+        map.set('tx2', upper);
+        map.set('dark2', upper);
+        map.set('text2', upper);
+      } else if (name === 'lt2') {
+        map.set('bg2', upper);
+        map.set('light2', upper);
+        map.set('background2', upper);
+      } else if (name === 'hlink') {
+        map.set('hyperlink', upper);
+      } else if (name === 'folHlink') {
+        map.set('followedHyperlink', upper);
+      }
+    }
+  }
+  return map;
+}
+
+function parseWordToggle(el: Element | null): boolean | undefined {
+  if (!el) return undefined;
+  const val = getAttr(el, 'val');
+  if (val === '0' || val === 'false' || val === 'off') return false;
+  return true;
+}
+
+function parseRPrElement(rPr: Element | null, themeColors?: Map<string, string>): ResolvedRunProps {
+  if (!rPr) return {};
+  const style: ResolvedRunProps = {};
+
   const bEl = getFirstChild(rPr, 'b');
-  if (bEl && getAttr(bEl, 'val') !== '0' && getAttr(bEl, 'val') !== 'false') {
-    style.bold = true;
+  const bCsEl = getFirstChild(rPr, 'bCs');
+  const bVal = parseWordToggle(bEl);
+  const bCsVal = parseWordToggle(bCsEl);
+  if (bVal !== undefined) {
+    style.bold = bVal;
+  } else if (bCsVal !== undefined) {
+    style.bold = bCsVal;
   }
+
   const iEl = getFirstChild(rPr, 'i');
-  if (iEl && getAttr(iEl, 'val') !== '0' && getAttr(iEl, 'val') !== 'false') {
-    style.italic = true;
+  const iCsEl = getFirstChild(rPr, 'iCs');
+  const iVal = parseWordToggle(iEl);
+  const iCsVal = parseWordToggle(iCsEl);
+  if (iVal !== undefined) {
+    style.italic = iVal;
+  } else if (iCsVal !== undefined) {
+    style.italic = iCsVal;
   }
+
   const uEl = getFirstChild(rPr, 'u');
-  if (uEl && getAttr(uEl, 'val') !== 'none') {
-    style.underline = true;
+  if (uEl) {
+    const uVal = getAttr(uEl, 'val');
+    style.underline = uVal !== 'none' && uVal !== 'false' && uVal !== '0';
   }
+
   const szEl = getFirstChild(rPr, 'sz');
   const szVal = getAttr(szEl, 'val');
   if (szVal && !Number.isNaN(Number(szVal))) {
     style.font_size_pt = Math.round((Number(szVal) / 2) * 10) / 10;
   }
+
   const colorEl = getFirstChild(rPr, 'color');
-  const colorVal = getAttr(colorEl, 'val');
-  if (colorVal && /^[0-9A-Fa-f]{6}$/.test(colorVal) && colorVal.toUpperCase() !== '000000') {
-    style.color = `#${colorVal.toUpperCase()}`;
+  if (colorEl) {
+    const colorVal = getAttr(colorEl, 'val');
+    const themeColor = getAttr(colorEl, 'themeColor');
+    const themeTint = getAttr(colorEl, 'themeTint');
+    const themeShade = getAttr(colorEl, 'themeShade');
+
+    if (colorVal && /^[0-9A-Fa-f]{6}$/.test(colorVal)) {
+      const upper = colorVal.toUpperCase();
+      style.color = upper === '000000' ? null : `#${upper}`;
+    } else if (themeColor) {
+      const baseHex = themeColors?.get(themeColor) ?? DEFAULT_OFFICE_THEME_COLORS[themeColor];
+      if (baseHex) {
+        const tinted = applyThemeTintShade(baseHex, themeTint, themeShade);
+        style.color = tinted === '000000' ? null : `#${tinted}`;
+      }
+    } else if (colorVal && colorVal.toLowerCase() === 'auto') {
+      style.color = null;
+    }
   }
+
   return style;
+}
+
+function mergeRunProps(...layers: Array<ResolvedRunProps | undefined>): ResolvedRunProps {
+  const out: ResolvedRunProps = {};
+  for (const layer of layers) {
+    if (!layer) continue;
+    if (layer.bold !== undefined) out.bold = layer.bold;
+    if (layer.italic !== undefined) out.italic = layer.italic;
+    if (layer.underline !== undefined) out.underline = layer.underline;
+    if (layer.font_size_pt !== undefined) out.font_size_pt = layer.font_size_pt;
+    if (layer.color !== undefined) out.color = layer.color;
+  }
+  return out;
+}
+
+function resolvedPropsToSegmentStyle(props: ResolvedRunProps): Omit<InlineSegment, 'type' | 'content'> {
+  const out: Omit<InlineSegment, 'type' | 'content'> = {};
+  if (props.bold) out.bold = true;
+  if (props.italic) out.italic = true;
+  if (props.underline) out.underline = true;
+  if (props.font_size_pt !== undefined) out.font_size_pt = props.font_size_pt;
+  if (props.color) out.color = props.color;
+  return out;
+}
+
+function parseStylesDocument(
+  stylesXml: Document | null,
+  themeColors: Map<string, string>
+): DocxStyleContext {
+  const styleCtx: DocxStyleContext = {
+    themeColors,
+    docDefaultRun: {},
+    paragraphStyles: new Map(),
+    characterStyles: new Map(),
+    tableStyles: new Map(),
+  };
+  if (!stylesXml) return styleCtx;
+
+  const docDefaults = Array.from(stylesXml.getElementsByTagName('*')).find(
+    (el) => getLocalName(el) === 'docDefaults'
+  );
+  if (docDefaults) {
+    const rPrDefault = getFirstChild(docDefaults, 'rPrDefault');
+    const rPr = rPrDefault ? getFirstChild(rPrDefault, 'rPr') : null;
+    styleCtx.docDefaultRun = parseRPrElement(rPr, themeColors);
+  }
+
+  const styleEls = Array.from(stylesXml.getElementsByTagName('*')).filter(
+    (el) => getLocalName(el) === 'style'
+  );
+  for (const sEl of styleEls) {
+    const sType = getAttr(sEl, 'type') ?? '';
+    const sId = getAttr(sEl, 'styleId');
+    if (!sId) continue;
+    const basedOn = getAttr(getFirstChild(sEl, 'basedOn'), 'val') ?? undefined;
+    const rPr = parseRPrElement(getFirstChild(sEl, 'rPr'), themeColors);
+
+    if (sType === 'paragraph') {
+      const pPr = getFirstChild(sEl, 'pPr');
+      const jcVal = pPr ? getAttr(getFirstChild(pPr, 'jc'), 'val') : null;
+      let alignment: BlockAlignment | undefined;
+      if (jcVal === 'center') alignment = 'center';
+      else if (jcVal === 'right' || jcVal === 'end') alignment = 'right';
+      else if (jcVal === 'both' || jcVal === 'distribute') alignment = 'justify';
+      else if (jcVal === 'left' || jcVal === 'start') alignment = 'left';
+      styleCtx.paragraphStyles.set(sId, { basedOn, rPr, alignment });
+    } else if (sType === 'character') {
+      styleCtx.characterStyles.set(sId, { basedOn, rPr });
+    } else if (sType === 'table') {
+      let firstRowRPr: ResolvedRunProps = {};
+      for (const tblStylePr of getChildElements(sEl, 'tblStylePr')) {
+        if (getAttr(tblStylePr, 'type') === 'firstRow') {
+          firstRowRPr = parseRPrElement(getFirstChild(tblStylePr, 'rPr'), themeColors);
+        }
+      }
+      styleCtx.tableStyles.set(sId, { rPr, firstRowRPr });
+    }
+  }
+
+  return styleCtx;
+}
+
+function resolveParagraphStyleChain(
+  styleCtx: DocxStyleContext | undefined,
+  styleId: string | undefined
+): { rPr: ResolvedRunProps; alignment?: BlockAlignment } {
+  if (!styleCtx || !styleId) return { rPr: {} };
+  const chain: Array<{ rPr: ResolvedRunProps; alignment?: BlockAlignment }> = [];
+  const visited = new Set<string>();
+  let cur: string | undefined = styleId;
+  while (cur && !visited.has(cur)) {
+    visited.add(cur);
+    const entry = styleCtx.paragraphStyles.get(cur);
+    if (!entry) break;
+    chain.unshift({ rPr: entry.rPr, alignment: entry.alignment });
+    cur = entry.basedOn;
+  }
+  let alignment: BlockAlignment | undefined;
+  for (const item of chain) {
+    if (item.alignment) alignment = item.alignment;
+  }
+  return {
+    rPr: mergeRunProps(...chain.map((c) => c.rPr)),
+    alignment,
+  };
+}
+
+function resolveCharacterStyleChain(
+  styleCtx: DocxStyleContext | undefined,
+  styleId: string | undefined
+): ResolvedRunProps {
+  if (!styleCtx || !styleId) return {};
+  const chain: ResolvedRunProps[] = [];
+  const visited = new Set<string>();
+  let cur: string | undefined = styleId;
+  while (cur && !visited.has(cur)) {
+    visited.add(cur);
+    const entry = styleCtx.characterStyles.get(cur);
+    if (!entry) break;
+    chain.unshift(entry.rPr);
+    cur = entry.basedOn;
+  }
+  return mergeRunProps(...chain);
+}
+
+function parseRunFormatting(
+  rEl: Element,
+  baseRunProps?: ResolvedRunProps,
+  styleCtx?: DocxStyleContext
+): Omit<InlineSegment, 'type' | 'content'> {
+  const rPr = getFirstChild(rEl, 'rPr');
+  const rStyleId = rPr ? getAttr(getFirstChild(rPr, 'rStyle'), 'val') ?? undefined : undefined;
+  const charStyleProps = resolveCharacterStyleChain(styleCtx, rStyleId);
+  const directProps = parseRPrElement(rPr, styleCtx?.themeColors);
+  const merged = mergeRunProps(baseRunProps, charStyleProps, directProps);
+  return resolvedPropsToSegmentStyle(merged);
+}
+
+function extractOmmlRunStyle(
+  mathEl: Element,
+  baseRunProps?: ResolvedRunProps,
+  styleCtx?: DocxStyleContext
+): Omit<InlineSegment, 'type' | 'content'> {
+  const mathRuns = Array.from(mathEl.getElementsByTagName('*')).filter(
+    (el) => getLocalName(el) === 'r' && (el.prefix === 'm' || el.namespaceURI?.includes('/math'))
+  );
+  if (mathRuns.length === 0) {
+    return resolvedPropsToSegmentStyle(baseRunProps ?? {});
+  }
+
+  let nonEmptyCount = 0;
+  let boldCount = 0;
+  const colorCounts = new Map<string, number>();
+
+  for (const mr of mathRuns) {
+    const txt = (mr.textContent ?? '').trim();
+    if (!txt) continue;
+    nonEmptyCount++;
+    const wRPr = getFirstChild(mr, 'rPr');
+    const direct = parseRPrElement(wRPr, styleCtx?.themeColors);
+    const mRPr = Array.from(mr.childNodes).find(
+      (n) =>
+        n.nodeType === 1 &&
+        getLocalName(n as Element) === 'rPr' &&
+        ((n as Element).prefix === 'm' || (n as Element).namespaceURI?.includes('/math'))
+    ) as Element | undefined;
+    const styVal = mRPr ? getAttr(getFirstChild(mRPr, 'sty'), 'val') : null;
+    const isBold = direct.bold !== undefined ? direct.bold : styVal === 'b' || styVal === 'bi' ? true : Boolean(baseRunProps?.bold);
+    if (isBold) boldCount++;
+
+    const effectiveColor = direct.color !== undefined ? direct.color : baseRunProps?.color ?? null;
+    if (effectiveColor) {
+      colorCounts.set(effectiveColor, (colorCounts.get(effectiveColor) ?? 0) + 1);
+    }
+  }
+
+  const out: Omit<InlineSegment, 'type' | 'content'> = {};
+  if (nonEmptyCount > 0 && boldCount === nonEmptyCount) {
+    out.bold = true;
+  }
+  // Apply color if majority of runs in this OMML share the same non-black color
+  for (const [col, cnt] of colorCounts.entries()) {
+    if (cnt >= Math.ceil(nonEmptyCount * 0.6)) {
+      out.color = col;
+      break;
+    }
+  }
+  return out;
 }
 
 function sameTextStyle(
@@ -666,11 +1003,14 @@ function splitParagraphTextSegmentsForLatex(segments: InlineSegment[]): InlineSe
 
 interface NumberingTracker {
   numToAbstract: Map<string, string>;
-  levelFormats: Map<string, { fmt: string; lvlText: string }>;
+  levelFormats: Map<string, { fmt: string; lvlText: string; rPr?: ResolvedRunProps }>;
   counters: Map<string, number>;
 }
 
-function createNumberingTracker(numberingXml: Document | null): NumberingTracker {
+function createNumberingTracker(
+  numberingXml: Document | null,
+  themeColors?: Map<string, string>
+): NumberingTracker {
   const tracker: NumberingTracker = {
     numToAbstract: new Map(),
     levelFormats: new Map(),
@@ -688,7 +1028,8 @@ function createNumberingTracker(numberingXml: Document | null): NumberingTracker
       const ilvl = getAttr(lvl, 'ilvl') ?? '0';
       const fmt = getAttr(getFirstChild(lvl, 'numFmt'), 'val') ?? 'decimal';
       const lvlText = getAttr(getFirstChild(lvl, 'lvlText'), 'val') ?? '%1.';
-      tracker.levelFormats.set(`${absId}:${ilvl}`, { fmt, lvlText });
+      const lvlRPr = parseRPrElement(getFirstChild(lvl, 'rPr'), themeColors);
+      tracker.levelFormats.set(`${absId}:${ilvl}`, { fmt, lvlText, rPr: lvlRPr });
     }
   }
 
@@ -705,10 +1046,14 @@ function createNumberingTracker(numberingXml: Document | null): NumberingTracker
   return tracker;
 }
 
-function nextListLabel(tracker: NumberingTracker, numId: string, ilvl: string): string {
+function nextListLabel(
+  tracker: NumberingTracker,
+  numId: string,
+  ilvl: string
+): { text: string; rPr?: ResolvedRunProps } {
   const absId = tracker.numToAbstract.get(numId);
   const spec = absId ? tracker.levelFormats.get(`${absId}:${ilvl}`) : undefined;
-  if (spec?.fmt === 'bullet') return '• ';
+  if (spec?.fmt === 'bullet') return { text: '• ', rPr: spec.rPr };
 
   const key = `${numId}:${ilvl}`;
   const count = (tracker.counters.get(key) ?? 0) + 1;
@@ -723,9 +1068,9 @@ function nextListLabel(tracker: NumberingTracker, numId: string, ilvl: string): 
       : String(count);
 
   if (spec?.lvlText) {
-    return `${spec.lvlText.replace(/%\d+/g, formatted)} `;
+    return { text: `${spec.lvlText.replace(/%\d+/g, formatted)} `, rPr: spec.rPr };
   }
-  return `${formatted}. `;
+  return { text: `${formatted}. `, rPr: spec?.rPr };
 }
 
 function findBlipEmbedId(node: Element): string | null {
@@ -765,6 +1110,7 @@ interface DocxMediaContext {
   mediaMap: Map<string, DecodedImageAsset>;
   oleLatexMap: Map<string, string>;
   wmfLatexMap: Map<string, string>;
+  styleCtx?: DocxStyleContext;
 }
 
 interface ParsedParagraphResult {
@@ -776,7 +1122,8 @@ function parseParagraphElement(
   pEl: Element,
   ctx: DocxMediaContext,
   pageWidthPt: number,
-  numberingTracker?: NumberingTracker
+  numberingTracker?: NumberingTracker,
+  inheritedTableRunProps?: ResolvedRunProps
 ): ParsedParagraphResult {
   const pPr = getFirstChild(pEl, 'pPr');
   let alignment: BlockAlignment = 'left';
@@ -786,15 +1133,21 @@ function parseParagraphElement(
   let firstLineIndentPt: number | undefined;
   let lineSpacing: number | undefined;
   let tabStopsPt: number[] | undefined;
-  let listPrefix: string | null = null;
+  let listPrefix: { text: string; rPr?: ResolvedRunProps } | null = null;
+  let pStyleId: string | undefined;
 
   if (pPr) {
+    const styleVal = getAttr(getFirstChild(pPr, 'pStyle'), 'val') ?? '';
+    if (styleVal) pStyleId = styleVal;
+    const resolvedPStyle = resolveParagraphStyleChain(ctx.styleCtx, pStyleId);
+    if (resolvedPStyle.alignment) alignment = resolvedPStyle.alignment;
+
     const jcVal = getAttr(getFirstChild(pPr, 'jc'), 'val');
     if (jcVal === 'center') alignment = 'center';
     else if (jcVal === 'right' || jcVal === 'end') alignment = 'right';
     else if (jcVal === 'both' || jcVal === 'distribute') alignment = 'justify';
+    else if (jcVal === 'left' || jcVal === 'start') alignment = 'left';
 
-    const styleVal = getAttr(getFirstChild(pPr, 'pStyle'), 'val') ?? '';
     const hMatch = styleVal.match(/^(?:Heading|Titre|Title)(\d?)$/i);
     if (hMatch) {
       isHeading = true;
@@ -848,11 +1201,21 @@ function parseParagraphElement(
     }
   }
 
+  const pStyleProps = resolveParagraphStyleChain(ctx.styleCtx, pStyleId).rPr;
+  const pPrRunProps = pPr ? parseRPrElement(getFirstChild(pPr, 'rPr'), ctx.styleCtx?.themeColors) : undefined;
+  const baseRunProps = mergeRunProps(
+    ctx.styleCtx?.docDefaultRun,
+    inheritedTableRunProps,
+    pStyleProps,
+    pPrRunProps
+  );
+
   const rawSegments: InlineSegment[] = [];
   const standaloneFigures: DocumentBlock[] = [];
   let pendingTab = false;
   let hasPageBreakAfter = false;
   let standaloneEqLatex: string | null = null;
+  let standaloneEqStyle: Omit<InlineSegment, 'type' | 'content'> = {};
   let hasNonEmptyTextRuns = false;
 
   const handleEmbeddedObjectOrImage = (
@@ -861,6 +1224,8 @@ function parseParagraphElement(
   ) => {
     const tagName = getLocalName(el);
     const extraStyle: Partial<InlineSegment> = {};
+    if (runStyle?.bold) extraStyle.bold = true;
+    if (runStyle?.italic) extraStyle.italic = true;
     if (runStyle?.underline) extraStyle.underline = true;
     if (runStyle?.color) extraStyle.color = runStyle.color;
 
@@ -918,10 +1283,17 @@ function parseParagraphElement(
     if (tag === 'oMathPara') {
       const latex = ommlElementToLatex(el).trim();
       if (latex) {
+        const mathStyle = extractOmmlRunStyle(el, baseRunProps, ctx.styleCtx);
         if (!hasNonEmptyTextRuns && rawSegments.length === 0) {
           standaloneEqLatex = latex;
+          standaloneEqStyle = mathStyle;
         } else {
-          rawSegments.push({ type: 'math', content: latex, ...(pendingTab ? { tab_before: true } : {}) });
+          rawSegments.push({
+            type: 'math',
+            content: latex,
+            ...mathStyle,
+            ...(pendingTab ? { tab_before: true } : {}),
+          });
           pendingTab = false;
         }
       }
@@ -931,18 +1303,19 @@ function parseParagraphElement(
     if (tag === 'oMath') {
       const latex = ommlElementToLatex(el).trim();
       if (latex) {
+        const mathStyle = extractOmmlRunStyle(el, baseRunProps, ctx.styleCtx);
         if (pendingTab) {
-          rawSegments.push({ type: 'math', content: latex, tab_before: true });
+          rawSegments.push({ type: 'math', content: latex, ...mathStyle, tab_before: true });
           pendingTab = false;
         } else {
-          rawSegments.push({ type: 'math', content: latex });
+          rawSegments.push({ type: 'math', content: latex, ...mathStyle });
         }
       }
       return;
     }
 
     if (tag === 'object' || tag === 'drawing' || tag === 'pict') {
-      handleEmbeddedObjectOrImage(el);
+      handleEmbeddedObjectOrImage(el, resolvedPropsToSegmentStyle(baseRunProps));
       return;
     }
 
@@ -960,7 +1333,7 @@ function parseParagraphElement(
     }
 
     if (tag === 'r') {
-      const rStyle = parseRunFormatting(el);
+      const rStyle = parseRunFormatting(el, baseRunProps, ctx.styleCtx);
       for (let i = 0; i < el.childNodes.length; i++) {
         const ch = el.childNodes[i];
         if (ch.nodeType !== 1) continue;
@@ -1010,7 +1383,8 @@ function parseParagraphElement(
   getChildElements(pEl).forEach(processNode);
   const segments = splitParagraphTextSegmentsForLatex(rawSegments);
   if (listPrefix && segments.length > 0) {
-    segments.unshift({ type: 'text', content: listPrefix, bold: listPrefix !== '• ' });
+    const labelStyle = resolvedPropsToSegmentStyle(mergeRunProps(baseRunProps, listPrefix.rPr));
+    segments.unshift({ type: 'text', content: listPrefix.text, ...labelStyle });
   }
 
   const blocks: DocumentBlock[] = [];
@@ -1026,6 +1400,10 @@ function parseParagraphElement(
     alignment === 'center'
   ) {
     standaloneEqLatex = nonBlankSegments[0].content;
+    standaloneEqStyle = {
+      ...(nonBlankSegments[0].bold ? { bold: true } : {}),
+      ...(nonBlankSegments[0].color ? { color: nonBlankSegments[0].color } : {}),
+    };
     hasNonEmptyTextRuns = false;
   }
 
@@ -1035,6 +1413,8 @@ function parseParagraphElement(
       alignment: alignment === 'left' ? 'center' : alignment,
       latex: standaloneEqLatex,
       font_size_pt: 12,
+      ...(standaloneEqStyle.bold ? { bold: true } : {}),
+      ...(standaloneEqStyle.color ? { color: standaloneEqStyle.color } : {}),
     });
   } else if (segments.length > 0) {
     // Check bottom border horizontal rule paragraph
@@ -1099,6 +1479,11 @@ function parseTableElement(
     isBorderless = allNone;
   }
 
+  const tblStyleId = tblPr ? getAttr(getFirstChild(tblPr, 'tblStyle'), 'val') : null;
+  const tblStyleEntry = tblStyleId ? ctx.styleCtx?.tableStyles.get(tblStyleId) : undefined;
+  const tblLook = tblPr ? getFirstChild(tblPr, 'tblLook') : null;
+  const firstRowEnabled = !tblLook || getAttr(tblLook, 'firstRow') !== '0';
+
   const tblGrid = getFirstChild(tblEl, 'tblGrid');
   const gridCols = tblGrid
     ? getChildElements(tblGrid, 'gridCol').map((gc) => Number(getAttr(gc, 'w') ?? 0))
@@ -1113,6 +1498,12 @@ function parseTableElement(
     const tcEls = getChildElements(tr, 'tc');
     const rowCells: TableCellData[] = [];
     let colCursor = 0;
+    const rowInheritedProps =
+      tblStyleEntry
+        ? rIdx === 0 && firstRowEnabled
+          ? mergeRunProps(tblStyleEntry.rPr, tblStyleEntry.firstRowRPr)
+          : tblStyleEntry.rPr
+        : undefined;
 
     for (const tc of tcEls) {
       const tcPr = getFirstChild(tc, 'tcPr');
@@ -1148,12 +1539,17 @@ function parseTableElement(
       let cellAlignment: BlockAlignment = 'left';
 
       cellParagraphs.forEach((pEl, pIdx) => {
-        const res = parseParagraphElement(pEl, ctx, pageWidthPt);
+        const res = parseParagraphElement(pEl, ctx, pageWidthPt, undefined, rowInheritedProps);
         res.blocks.forEach((b) => {
           if (pIdx === 0 && b.alignment) cellAlignment = b.alignment;
           if (b.block_type === 'equation' && b.latex) {
             if (cellSegments.length > 0) cellSegments.push({ type: 'text', content: '\n' });
-            cellSegments.push({ type: 'math', content: b.latex });
+            cellSegments.push({
+              type: 'math',
+              content: b.latex,
+              ...(b.bold ? { bold: true } : {}),
+              ...(b.color ? { color: b.color } : {}),
+            });
           } else if (b.segments && b.segments.length > 0) {
             if (cellSegments.length > 0) cellSegments.push({ type: 'text', content: '\n' });
             cellSegments.push(...b.segments);
@@ -1217,19 +1613,35 @@ export async function parseDocxFileToPages(file: File): Promise<PageExtraction[]
   const docXmlStr = await docXmlFile.async('string');
   const docXml = parser.parseFromString(docXmlStr, 'application/xml');
 
+  let themeXml: Document | null = null;
+  const themeFile = zip.file('word/theme/theme1.xml');
+  if (themeFile) {
+    const themeStr = await themeFile.async('string');
+    themeXml = parser.parseFromString(themeStr, 'application/xml');
+  }
+  const themeColors = parseThemeColors(themeXml);
+
+  let stylesXml: Document | null = null;
+  const stylesFile = zip.file('word/styles.xml');
+  if (stylesFile) {
+    const stylesStr = await stylesFile.async('string');
+    stylesXml = parser.parseFromString(stylesStr, 'application/xml');
+  }
+  const styleCtx = parseStylesDocument(stylesXml, themeColors);
+
   let numberingXml: Document | null = null;
   const numberingFile = zip.file('word/numbering.xml');
   if (numberingFile) {
     const numStr = await numberingFile.async('string');
     numberingXml = parser.parseFromString(numStr, 'application/xml');
   }
-  const numberingTracker = createNumberingTracker(numberingXml);
+  const numberingTracker = createNumberingTracker(numberingXml, themeColors);
 
   // Load relationships -> media assets + MathType OLE / WMF equations
   const mediaMap = new Map<string, DecodedImageAsset>();
   const oleLatexMap = new Map<string, string>();
   const wmfLatexMap = new Map<string, string>();
-  const ctx: DocxMediaContext = { mediaMap, oleLatexMap, wmfLatexMap };
+  const ctx: DocxMediaContext = { mediaMap, oleLatexMap, wmfLatexMap, styleCtx };
 
   const relsFile = zip.file('word/_rels/document.xml.rels');
   if (relsFile) {

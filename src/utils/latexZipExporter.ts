@@ -10,6 +10,7 @@ import type {
 import {
   cleanLatexDelimiters,
   computePageGeometry,
+  computeSafeTableColPcts,
   groupBlocksIntoVisualBands,
   hasLeadingChoiceLabel,
   isChoiceTableBlock,
@@ -228,7 +229,9 @@ export function segmentsToCompilableLatex(
     const seg = segments[i];
     let tabPrefix = '';
     if (seg.tab_before) {
-      if (seg.tab_leader === 'dot') {
+      if (typeof seg.tab_width_pt === 'number' && Number.isFinite(seg.tab_width_pt) && seg.tab_width_pt > 0) {
+        tabPrefix = `\\hspace*{${Math.round(seg.tab_width_pt * 10) / 10}pt}`;
+      } else if (seg.tab_leader === 'dot') {
         const repeatCount = Math.max(1, Math.min(4, Math.round(seg.tab_weight ?? 1)));
         tabPrefix = ` ${'\\dotfill'.repeat(repeatCount)} `;
       } else if (seg.tab_leader === 'underscore') {
@@ -244,6 +247,9 @@ export function segmentsToCompilableLatex(
       const inner = sanitizeMathForTex(seg.content ?? '');
       if (!inner) continue;
       let mathOut = `$${inner}$`;
+      if (seg.underline) mathOut = `\\underline{${mathOut}}`;
+      if (seg.italic) mathOut = `\\textit{${mathOut}}`;
+      if (seg.bold) mathOut = `{\\boldmath ${mathOut}}`;
       const hex = normalizeHexColor(seg.color);
       if (hex) {
         mathOut = `\\textcolor[HTML]{${hex}}{${mathOut}}`;
@@ -428,16 +434,95 @@ function renderTableLatex(
   const isBooktabs = !isBorderless && blk.table_style === 'booktabs';
   const isBox = !isBorderless && blk.table_style === 'box';
 
-  const colAligns = Array.from({ length: colCount }, (_, cIdx) => {
-    const sampleCell = rows[0]?.[cIdx];
-    const align = sampleCell?.alignment;
-    if (hasNestedBlocks || hasLongCells) {
-      return 'X';
-    }
-    return align === 'center' ? 'c' : align === 'right' ? 'r' : 'l';
-  });
+  const geom = computePageGeometry(page);
+  const safeColPcts = computeSafeTableColPcts(rows, colCount, geom.contentWidthPt, isBorderless);
 
-  const useTabularX = hasNestedBlocks || hasLongCells;
+  const getColumnAlign = (cIdx: number): 'left' | 'center' | 'right' => {
+    // Prefer body row alignment over row 0 header alignment when body rows exist
+    const bodyAlignCounts = { left: 0, center: 0, right: 0 };
+    const startR = rows.length > 1 ? 1 : 0;
+    for (let r = startR; r < rows.length; r++) {
+      let cursor = 0;
+      for (const cell of rows[r]) {
+        const sp = Math.max(1, cell.col_span ?? 1);
+        if (cursor === cIdx && sp === 1 && cell.alignment) {
+          if (cell.alignment === 'center') bodyAlignCounts.center++;
+          else if (cell.alignment === 'right') bodyAlignCounts.right++;
+          else bodyAlignCounts.left++;
+        }
+        cursor += sp;
+      }
+    }
+    if (bodyAlignCounts.center > bodyAlignCounts.left && bodyAlignCounts.center >= bodyAlignCounts.right) {
+      return 'center';
+    }
+    if (bodyAlignCounts.right > bodyAlignCounts.left && bodyAlignCounts.right > bodyAlignCounts.center) {
+      return 'right';
+    }
+    const sampleAlign = rows[0]?.[cIdx]?.alignment;
+    return sampleAlign === 'center' ? 'center' : sampleAlign === 'right' ? 'right' : 'left';
+  };
+
+  const alignPrefixForP = (a: 'left' | 'center' | 'right'): string =>
+    a === 'center'
+      ? '>{\\centering\\arraybackslash}'
+      : a === 'right'
+      ? '>{\\raggedleft\\arraybackslash}'
+      : '>{\\raggedright\\arraybackslash}';
+
+  const useProportionalWidths =
+    Boolean(safeColPcts) && (hasNestedBlocks || hasLongCells || (!isBorderless && colCount >= 2));
+  const useTabularX = !useProportionalWidths && (hasNestedBlocks || hasLongCells);
+
+  let colAligns: string[];
+  if (useProportionalWidths && safeColPcts) {
+    // Deduct ~2\tabcolsep per column (~12pt per column) so total table width matches \linewidth exactly without overfull hbox
+    const tabcolsepOverheadFrac = Math.min(0.22, (colCount * 12) / Math.max(240, geom.contentWidthPt));
+    const usableFrac = 1 - tabcolsepOverheadFrac;
+    colAligns = safeColPcts.map((pct, cIdx) => {
+      const a = getColumnAlign(cIdx);
+      const frac = Math.max(0.05, (pct / 100) * usableFrac).toFixed(3);
+      return `${alignPrefixForP(a)}p{${frac}\\linewidth}`;
+    });
+  } else if (useTabularX) {
+    const maxColLen = Array.from({ length: colCount }, () => 0);
+    for (const row of rows) {
+      let cursor = 0;
+      for (const cell of row) {
+        const sp = Math.max(1, cell.col_span ?? 1);
+        if (sp === 1 && cursor < colCount) {
+          const hasBlocks = Array.isArray(cell.blocks) && cell.blocks.length > 0;
+          const len = hasBlocks
+            ? 80
+            : (cell.segments ?? []).reduce((sum, s) => sum + (s.content ?? '').length, 0);
+          if (len > maxColLen[cursor]) maxColLen[cursor] = len;
+        }
+        cursor += sp;
+      }
+    }
+    const wideFlags = maxColLen.map((len) => len > 18);
+    if (!wideFlags.some(Boolean)) {
+      const widestIdx = maxColLen.indexOf(Math.max(...maxColLen));
+      if (widestIdx >= 0) wideFlags[widestIdx] = true;
+    }
+    colAligns = Array.from({ length: colCount }, (_, cIdx) => {
+      const a = getColumnAlign(cIdx);
+      if (!wideFlags[cIdx]) {
+        return a === 'center' ? 'c' : a === 'right' ? 'r' : 'l';
+      }
+      return a === 'center'
+        ? '>{\\centering\\arraybackslash}X'
+        : a === 'right'
+        ? '>{\\raggedleft\\arraybackslash}X'
+        : '>{\\raggedright\\arraybackslash}X';
+    });
+  } else {
+    colAligns = Array.from({ length: colCount }, (_, cIdx) => {
+      const a = getColumnAlign(cIdx);
+      return a === 'center' ? 'c' : a === 'right' ? 'r' : 'l';
+    });
+  }
+
   let colSpec: string;
   if (isBorderless || isBooktabs) {
     colSpec = colAligns.join(' ');
@@ -447,13 +532,32 @@ function renderTableLatex(
     colSpec = `|${colAligns.join('|')}|`;
   }
 
-  const rowStrings = rows.map((row) => {
+  const getCellAtCol = (row: TableCellData[], targetCol: number): TableCellData | null => {
+    let c = 0;
+    for (const cell of row) {
+      const sp = Math.max(1, cell.col_span ?? 1);
+      if (c === targetCol) return cell;
+      if (c > targetCol) return null;
+      c += sp;
+    }
+    return null;
+  };
+
+  const rowStrings = rows.map((row, rIdx) => {
     const cellTexList: string[] = [];
+    let colCursor = 0;
     for (let cIdx = 0; cIdx < row.length; cIdx++) {
       const cell = row[cIdx];
+      const startCol = colCursor;
       const span = Math.max(1, cell.col_span ?? 1);
-      let cellInner = '';
+      colCursor += span;
 
+      if (cell.v_merge === 'continue') {
+        cellTexList.push(' ');
+        continue;
+      }
+
+      let cellInner = '';
       if (Array.isArray(cell.blocks) && cell.blocks.length > 0) {
         const nestedParts = cell.blocks
           .map((nb) => renderSingleBlockBasicLatex(nb, page, registry, { inContainer: true }))
@@ -461,8 +565,17 @@ function renderTableLatex(
         cellInner = nestedParts.join(' \\par ');
       } else {
         cellInner = segmentsToCompilableLatex(cell.segments, { inTableCell: true, baseFontPt });
-        if (cell.is_header && cellInner && !cellInner.includes('\\textbf{')) {
-          cellInner = `\\textbf{${cellInner}}`;
+      }
+
+      if (cell.v_merge === 'restart') {
+        let rowSpanCount = 1;
+        for (let nr = rIdx + 1; nr < rows.length; nr++) {
+          const below = getCellAtCol(rows[nr], startCol);
+          if (below && below.v_merge === 'continue') rowSpanCount += 1;
+          else break;
+        }
+        if (rowSpanCount > 1) {
+          cellInner = `\\multirow{${rowSpanCount}}{*}{${cellInner || ' '}}`;
         }
       }
 
@@ -471,10 +584,21 @@ function renderTableLatex(
         cellInner = `\\cellcolor[HTML]{${fillHex}}${cellInner || ' '}`;
       }
 
+      const colDefaultAlign = getColumnAlign(startCol);
+      const cellExplicitAlign = cell.alignment ?? colDefaultAlign;
+      const needsAlignOverride =
+        span === 1 &&
+        cellExplicitAlign !== colDefaultAlign &&
+        cellExplicitAlign !== 'justify';
+
       if (span > 1) {
-        const alignChar = cell.alignment === 'center' ? 'c' : cell.alignment === 'right' ? 'r' : 'l';
+        const alignChar = cellExplicitAlign === 'center' ? 'c' : cellExplicitAlign === 'right' ? 'r' : 'l';
         const spanSpec = isBorderless || isBooktabs ? alignChar : `|${alignChar}|`;
         cellTexList.push(`\\multicolumn{${span}}{${spanSpec}}{${cellInner || ' '}}`);
+      } else if (needsAlignOverride) {
+        const alignChar = cellExplicitAlign === 'center' ? 'c' : cellExplicitAlign === 'right' ? 'r' : 'l';
+        const spanSpec = isBorderless || isBooktabs ? alignChar : `|${alignChar}|`;
+        cellTexList.push(`\\multicolumn{1}{${spanSpec}}{${cellInner || ' '}}`);
       } else {
         cellTexList.push(cellInner || ' ');
       }
@@ -482,6 +606,7 @@ function renderTableLatex(
     return `  ${cellTexList.join(' & ')} \\\\`;
   });
 
+  // For bordered grid tables with vertical merges (v_merge='continue'), emit \cline instead of \hline where merged
   let body: string;
   if (isBorderless) {
     body = rowStrings.join('\n');
@@ -494,7 +619,41 @@ function renderTableLatex(
   } else if (isBox) {
     body = `  \\hline\n${rowStrings.join('\n')}\n  \\hline`;
   } else {
-    body = `  \\hline\n${rowStrings.join('\n  \\hline\n')}\n  \\hline`;
+    const joinedRows: string[] = ['  \\hline'];
+    for (let rIdx = 0; rIdx < rowStrings.length; rIdx++) {
+      joinedRows.push(rowStrings[rIdx]);
+      if (rIdx < rows.length - 1) {
+        const nextRow = rows[rIdx + 1];
+        const mergedCols = new Set<number>();
+        let cc = 0;
+        for (const c of nextRow) {
+          const sp = Math.max(1, c.col_span ?? 1);
+          if (c.v_merge === 'continue') {
+            for (let k = 0; k < sp; k++) mergedCols.add(cc + k + 1);
+          }
+          cc += sp;
+        }
+        if (mergedCols.size > 0 && mergedCols.size < colCount) {
+          const clines: string[] = [];
+          let startC = -1;
+          for (let col1 = 1; col1 <= colCount; col1++) {
+            if (!mergedCols.has(col1)) {
+              if (startC === -1) startC = col1;
+            } else if (startC !== -1) {
+              clines.push(`\\cline{${startC}-${col1 - 1}}`);
+              startC = -1;
+            }
+          }
+          if (startC !== -1) clines.push(`\\cline{${startC}-${colCount}}`);
+          joinedRows.push(`  ${clines.join('')}`);
+        } else {
+          joinedRows.push('  \\hline');
+        }
+      } else {
+        joinedRows.push('  \\hline');
+      }
+    }
+    body = joinedRows.join('\n');
   }
 
   const envName = useTabularX ? 'tabularx' : 'tabular';
@@ -506,7 +665,10 @@ function renderTableLatex(
   if (blk.alignment === 'center') {
     return `\\begin{center}\n${tbl}\n\\end{center}`;
   }
-  return tbl;
+  if (blk.alignment === 'right') {
+    return `\\begin{flushright}\n${tbl}\n\\end{flushright}`;
+  }
+  return `\\noindent${tbl}`;
 }
 
 function renderExamHeaderTableLatex(
@@ -566,9 +728,19 @@ function renderSingleBlockBasicLatex(
   blk: DocumentBlock,
   page: PageExtraction,
   registry: ImageRegistry,
-  opts: { inContainer?: boolean } = {}
+  opts: {
+    inContainer?: boolean;
+    indentLeftPt?: number;
+    indentRightPt?: number;
+    firstLineIndentPt?: number;
+  } = {}
 ): string {
-  const { inContainer = false } = opts;
+  const {
+    inContainer = false,
+    indentLeftPt = blk.indent_left_pt ?? 0,
+    indentRightPt = blk.indent_right_pt ?? 0,
+    firstLineIndentPt = blk.first_line_indent_pt ?? 0,
+  } = opts;
   const baseFontPt = page.base_font_size_pt ?? 12;
 
   if (blk.block_type === 'horizontal_rule') {
@@ -578,7 +750,18 @@ function renderSingleBlockBasicLatex(
   if (blk.block_type === 'equation') {
     const inner = sanitizeMathForTex(blk.latex ?? '');
     if (!inner) return '';
-    return `\\[\n${inner}\n\\]`;
+    const eqHex = normalizeHexColor(blk.color);
+    const prefixes: string[] = [];
+    if (blk.bold) prefixes.push('\\boldmath\\bfseries');
+    if (blk.italic) prefixes.push('\\itshape');
+    if (eqHex) prefixes.push(`\\color[HTML]{${eqHex}}`);
+    const eqStr =
+      blk.alignment === 'left'
+        ? `\\noindent\\ensuremath{\\displaystyle ${inner}}`
+        : blk.alignment === 'right'
+        ? `\\begin{flushright}\n$\\displaystyle ${inner}$\n\\end{flushright}`
+        : `\\[\n${inner}\n\\]`;
+    return prefixes.length > 0 ? `{${prefixes.join(' ')}\n${eqStr}\n}` : eqStr;
   }
 
   if (blk.block_type === 'figure') {
@@ -595,17 +778,20 @@ function renderSingleBlockBasicLatex(
   if (blk.block_type === 'heading') {
     const inner = segmentsToCompilableLatex(blk.segments, { baseFontPt });
     if (!inner) return '';
+    const sizeCmd =
+      getRelativeSizeCommand(blk.font_size_pt, baseFontPt) ??
+      (blk.heading_level === 1 ? '\\Large' : blk.heading_level === 3 ? '\\normalsize' : '\\large');
+    const sized = `{${sizeCmd} ${inner}}`;
     if (blk.alignment === 'center') {
-      const sizeCmd = blk.heading_level === 1 ? '\\Large' : blk.heading_level === 3 ? '\\normalsize' : '\\large';
-      return `\\begin{center}\n{${sizeCmd} ${inner}}\n\\end{center}`;
+      return `\\begin{center}\n${sized}\n\\end{center}`;
     }
-    const cmd =
-      blk.heading_level === 1
-        ? `\\section*{${inner}}`
-        : blk.heading_level === 3
-        ? `\\subsubsection*{${inner}}`
-        : `\\subsection*{${inner}}`;
-    return cmd;
+    if (blk.alignment === 'right') {
+      return `\\begin{flushright}\n${sized}\n\\end{flushright}`;
+    }
+    if (!inContainer && indentLeftPt > 3) {
+      return `{\\leftskip=${Math.round(indentLeftPt * 10) / 10}pt ${sized}\\par}`;
+    }
+    return `\\noindent ${sized}`;
   }
 
   const text = segmentsToCompilableLatex(blk.segments, {
@@ -615,13 +801,25 @@ function renderSingleBlockBasicLatex(
   if (!text) return '';
 
   const blockSizeCmd = getRelativeSizeCommand(blk.font_size_pt, baseFontPt);
-  const sizedText = blockSizeCmd ? `{${blockSizeCmd} ${text}}` : text;
-  const wrapped = inContainer ? sizedText : wrapBlockAlignment(sizedText, blk.alignment);
+  let sizedText = blockSizeCmd ? `{${blockSizeCmd} ${text}}` : text;
 
-  if (!inContainer && typeof blk.indent_left_pt === 'number' && blk.indent_left_pt >= 16 && blk.alignment !== 'center') {
-    return `\\begin{quote}\n${wrapped}\n\\end{quote}`;
+  if (!inContainer && blk.alignment !== 'center' && blk.alignment !== 'right') {
+    if (firstLineIndentPt > 3) {
+      sizedText = `\\hspace*{${Math.round(firstLineIndentPt * 10) / 10}pt}${sizedText}`;
+    }
+    const leftSkip = indentLeftPt > 3 ? Math.round(indentLeftPt * 10) / 10 : 0;
+    const rightSkip = indentRightPt > 3 ? Math.round(indentRightPt * 10) / 10 : 0;
+    const hangPt = firstLineIndentPt < -3 ? Math.round(Math.abs(firstLineIndentPt) * 10) / 10 : 0;
+    if (leftSkip > 0 || rightSkip > 0 || hangPt > 0) {
+      const prefixCmds: string[] = [];
+      if (leftSkip > 0) prefixCmds.push(`\\leftskip=${leftSkip}pt`);
+      if (rightSkip > 0) prefixCmds.push(`\\rightskip=${rightSkip}pt`);
+      if (hangPt > 0) prefixCmds.push(`\\hangindent=${hangPt}pt\\hangafter=1`);
+      return `{${prefixCmds.join(' ')} ${sizedText}\\par}`;
+    }
   }
-  return wrapped;
+
+  return inContainer ? sizedText : wrapBlockAlignment(sizedText, blk.alignment);
 }
 
 function isChoiceParagraph(blk: DocumentBlock): boolean {
@@ -754,10 +952,10 @@ function buildMainPreamble(
   const geom = firstPage ? computePageGeometry(firstPage) : null;
   const ptToCm = (pt: number) => `${(pt / 28.3465).toFixed(2)}cm`;
   const geoOpts = geom
-    ? `top=${ptToCm(clamp(geom.marginTopPt, 36, 72))},bottom=${ptToCm(
-        clamp(geom.marginBottomPt, 36, 72)
-      )},left=${ptToCm(clamp(geom.marginLeftPt, 36, 72))},right=${ptToCm(
-        clamp(geom.marginRightPt, 30, 72)
+    ? `top=${ptToCm(clamp(geom.marginTopPt, 18, 144))},bottom=${ptToCm(
+        clamp(geom.marginBottomPt, 18, 144)
+      )},left=${ptToCm(clamp(geom.marginLeftPt, 18, 144))},right=${ptToCm(
+        clamp(geom.marginRightPt, 18, 144)
       )}`
     : 'top=2cm,bottom=2cm,left=2cm,right=1.5cm';
 
@@ -774,6 +972,8 @@ function buildMainPreamble(
     '\\usepackage{setspace}',
     '\\usepackage{hyperref}',
     '',
+    '\\setlength{\\parindent}{0pt}',
+    '\\setlength{\\parskip}{0pt}',
     '\\graphicspath{{images/}{./}}',
     '',
     '\\begin{document}',
@@ -797,7 +997,13 @@ function generateBasicLatexFiles(
     const bands = groupBlocksIntoVisualBands(page.blocks, geom);
     const bandChunks: string[] = [];
 
-    for (const band of bands) {
+    for (let bIdx = 0; bIdx < bands.length; bIdx++) {
+      const band = bands[bIdx];
+      const vspacePrefix =
+        bIdx > 0 && band.spaceBeforePt > 2.5
+          ? `\\vspace{${Math.round(band.spaceBeforePt * 10) / 10}pt}\n`
+          : '';
+
       if (band.kind === 'sideBySide') {
         const leftFrac = clamp(band.leftWidthPct / 100 - 0.02, 0.22, 0.74).toFixed(2);
         const rightFrac = clamp(band.rightWidthPct / 100 - 0.02, 0.22, 0.74).toFixed(2);
@@ -805,19 +1011,25 @@ function generateBasicLatexFiles(
         const rightTex = renderSingleBlockBasicLatex(band.right, page, registry, { inContainer: true });
         if (leftTex || rightTex) {
           bandChunks.push(
-            [
-              `\\noindent\\begin{minipage}[t]{${leftFrac}\\textwidth}`,
-              leftTex || ' ',
-              '\\end{minipage}\\hfill',
-              `\\begin{minipage}[t]{${rightFrac}\\textwidth}`,
-              rightTex || ' ',
-              '\\end{minipage}',
-            ].join('\n')
+            vspacePrefix +
+              [
+                `\\noindent\\begin{minipage}[t]{${leftFrac}\\textwidth}`,
+                leftTex || ' ',
+                '\\end{minipage}\\hfill',
+                `\\begin{minipage}[t]{${rightFrac}\\textwidth}`,
+                rightTex || ' ',
+                '\\end{minipage}',
+              ].join('\n')
           );
         }
       } else {
-        const tex = renderSingleBlockBasicLatex(band.block, page, registry, { inContainer: false });
-        if (tex) bandChunks.push(tex);
+        const tex = renderSingleBlockBasicLatex(band.block, page, registry, {
+          inContainer: false,
+          indentLeftPt: band.indentLeftPt,
+          indentRightPt: band.indentRightPt,
+          firstLineIndentPt: band.firstLineIndentPt,
+        });
+        if (tex) bandChunks.push(`${vspacePrefix}${tex}`);
       }
     }
 

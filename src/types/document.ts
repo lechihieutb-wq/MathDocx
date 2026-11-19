@@ -63,9 +63,13 @@ export interface DocumentBlock {
   preserve_col_count?: boolean | null;
   box_2d?: number[] | null;
   font_size_pt?: number | null;
+  bold?: boolean;
+  italic?: boolean;
+  color?: string | null;
   line_spacing?: number | null;
   space_before_pt?: number | null;
   indent_left_pt?: number | null;
+  indent_right_pt?: number | null;
   first_line_indent_pt?: number | null;
   tab_stops_pt?: number[] | null;
   tab_stop_specs?: TabStopSpec[] | null;

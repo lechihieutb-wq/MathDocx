@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type MouseEvent } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import {
   AlignCenter,
   AlignJustify,
@@ -15,6 +15,7 @@ import {
   Plus,
   RotateCcw,
   Trash2,
+  Underline,
 } from 'lucide-react';
 import type {
   BlockAlignment,
@@ -40,9 +41,13 @@ import {
   type PageGeometry,
 } from '../utils/layoutMetrics';
 import {
+  TEXT_COLOR_SWATCHES,
+  applyColorInEditableText,
   editableStringToSegments,
+  getUniformBlockColor,
   isUniformBlockStyle,
   segmentsToEditableString,
+  toggleInlineStyleInEditableText,
 } from '../utils/previewEditor';
 import { MathRenderer } from './MathRenderer';
 
@@ -101,7 +106,7 @@ function getBlockFontSizePt(blk: DocumentBlock, pageBaseFontPt = 12): number {
     const delta = base - 12;
     return blk.heading_level === 1 ? 15 + delta : blk.heading_level === 3 ? 12 + delta : 13 + delta;
   }
-  if (blk.block_type === 'table') return Math.min(base, 11);
+  if (blk.block_type === 'table') return base;
   return base;
 }
 
@@ -135,12 +140,35 @@ function RenderSegments({
         const isBold = seg.bold !== undefined ? Boolean(seg.bold) : defaultBold;
 
         const tabPrefix = seg.tab_before ? (
-          <span className="inline-block w-8" aria-hidden="true" />
+          typeof seg.tab_width_pt === 'number' && seg.tab_width_pt > 0 ? (
+            <span
+              className="inline-block"
+              style={{ width: `${seg.tab_width_pt * scale}px` }}
+              aria-hidden="true"
+            />
+          ) : (
+            <span className="inline-block w-8" aria-hidden="true" />
+          )
         ) : null;
 
         if (seg.type === 'math') {
+          const mathStyleClass = [
+            isBold ? 'katex-bold-override font-bold' : '',
+            seg.italic ? 'italic' : '',
+            seg.underline ? 'underline' : '',
+          ]
+            .filter(Boolean)
+            .join(' ');
+
           if (mathFormat === 'latex') {
             const latexText = '${' + cleanLatexDelimiters(seg.content) + '}$';
+            const latexTextStyleClass = [
+              isBold ? 'font-bold' : '',
+              seg.italic ? 'italic' : '',
+              seg.underline ? 'underline' : '',
+            ]
+              .filter(Boolean)
+              .join(' ');
             if (disableEquationInspect) {
               return (
                 <span key={idx}>
@@ -149,9 +177,9 @@ function RenderSegments({
                     data-math-latex={seg.content}
                     style={{
                       fontSize: `${segFontPt * scale * 0.92}px`,
-                      color: hex ? `#${hex}` : undefined,
+                      color: hex ? `#${hex}` : '#000000',
                     }}
-                    className="inline font-mono px-1 mx-0.5 rounded bg-amber-50 text-slate-900 border border-amber-200/80"
+                    className={`inline font-mono px-1 mx-0.5 rounded bg-amber-50 border border-amber-200/80 ${latexTextStyleClass}`}
                   >
                     {latexText}
                   </span>
@@ -171,23 +199,15 @@ function RenderSegments({
                   title="Công thức Toggle TeX bọc ${...}$ — nhấn để xem chi tiết"
                   style={{
                     fontSize: `${segFontPt * scale * 0.92}px`,
-                    color: hex ? `#${hex}` : undefined,
+                    color: hex ? `#${hex}` : '#000000',
                   }}
-                  className="inline font-mono px-1 mx-0.5 rounded bg-amber-50 text-slate-900 border border-amber-200/80 hover:bg-amber-100/80 transition-colors cursor-pointer"
+                  className={`inline font-mono px-1 mx-0.5 rounded bg-amber-50 border border-amber-200/80 hover:bg-amber-100/80 transition-colors cursor-pointer ${latexTextStyleClass}`}
                 >
                   {latexText}
                 </button>
               </span>
             );
           }
-
-          const mathStyleClass = [
-            isBold ? 'font-bold' : '',
-            seg.italic ? 'italic' : '',
-            seg.underline ? 'underline' : '',
-          ]
-            .filter(Boolean)
-            .join(' ');
 
           if (disableEquationInspect) {
             return (
@@ -262,15 +282,24 @@ function RenderSegments({
   );
 }
 
+interface BlockPositionDraft {
+  spaceBeforePt: number;
+  indentLeftPt: number;
+  indentRightPt: number;
+  firstLineIndentPt: number;
+}
+
 function InlineBlockEditor({
   block,
   mathFormat,
+  initialPosition,
   onSave,
   onCancel,
   onDelete,
 }: {
   block: DocumentBlock;
   mathFormat: MathOutputFormat;
+  initialPosition: BlockPositionDraft;
   onSave: (nextBlock: DocumentBlock) => void;
   onCancel: () => void;
   onDelete?: () => void;
@@ -289,31 +318,58 @@ function InlineBlockEditor({
   const [headingLevel, setHeadingLevel] = useState<number>(block.heading_level ?? 2);
   const [alignment, setAlignment] = useState<BlockAlignment>(block.alignment ?? 'left');
   const [fontSizePt, setFontSizePt] = useState<number>(getBlockFontSizePt(block));
-  const [isBoldAll, setIsBoldAll] = useState<boolean>(
-    isUniformBlockStyle(block.segments, 'bold')
+  const [fontSizeDirty, setFontSizeDirty] = useState<boolean>(false);
+
+  // Position & indentation state (in pt)
+  const [spaceBeforePt, setSpaceBeforePt] = useState<number>(
+    Math.round(initialPosition.spaceBeforePt * 10) / 10
   );
-  const [isItalicAll, setIsItalicAll] = useState<boolean>(
-    isUniformBlockStyle(block.segments, 'italic')
+  const [indentLeftPt, setIndentLeftPt] = useState<number>(
+    Math.round(initialPosition.indentLeftPt * 10) / 10
   );
+  const [indentRightPt, setIndentRightPt] = useState<number>(
+    Math.round(initialPosition.indentRightPt * 10) / 10
+  );
+  const [firstLineIndentPt, setFirstLineIndentPt] = useState<number>(
+    Math.round(initialPosition.firstLineIndentPt * 10) / 10
+  );
+  const [positionDirty, setPositionDirty] = useState<boolean>(false);
 
   const [draftText, setDraftText] = useState<string>(() =>
     segmentsToEditableString(block.segments)
   );
   const [draftTabCols, setDraftTabCols] = useState<string[]>(initialTabColumns);
+  const [activeTabColIdx, setActiveTabColIdx] = useState<number>(0);
 
+  const mainTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const tabTextareaRefs = useRef<(HTMLTextAreaElement | null)[]>([]);
+  const cellTextareaRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
+
+  // Equation-specific state
   const [draftLatex, setDraftLatex] = useState<string>(() =>
     cleanLatexDelimiters(block.latex ?? '')
   );
+  const [eqBold, setEqBold] = useState<boolean>(Boolean(block.bold));
+  const [eqItalic, setEqItalic] = useState<boolean>(Boolean(block.italic));
+  const [eqColor, setEqColor] = useState<string | null>(() => {
+    const h = normalizeHexColor(block.color);
+    return h && h !== '000000' ? h : null;
+  });
 
+  // Table-specific state
   const [draftRows, setDraftRows] = useState<string[][]>(() =>
     (block.table_rows ?? []).map((row) =>
       row.map((cell) => segmentsToEditableString(cell.segments))
     )
   );
+  const [draftCellAligns, setDraftCellAligns] = useState<(BlockAlignment | undefined)[][]>(() =>
+    (block.table_rows ?? []).map((row) => row.map((cell) => cell.alignment ?? undefined))
+  );
   const [activeCell, setActiveCell] = useState<{ r: number; c: number } | null>(
     block.block_type === 'table' ? { r: 0, c: 0 } : null
   );
 
+  // Figure-specific state
   const [draftCaption, setDraftCaption] = useState<string>(block.caption ?? '');
 
   useEffect(() => {
@@ -327,41 +383,128 @@ function InlineBlockEditor({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [onCancel]);
 
-  const buildPreviewParagraphSegments = (): InlineSegment[] => {
-    const styleOverride: Partial<InlineSegment> = {
-      ...(isBoldAll ? { bold: true } : {}),
-      ...(isItalicAll ? { italic: true } : {}),
-      font_size_pt: fontSizePt,
+  const buildPositionPatch = (includeFirstLine: boolean): Partial<DocumentBlock> => {
+    if (!positionDirty) return {};
+    return {
+      space_before_pt: Math.max(0, Math.min(200, Number.isFinite(spaceBeforePt) ? spaceBeforePt : 0)),
+      indent_left_pt: Math.max(0, Math.min(300, Number.isFinite(indentLeftPt) ? indentLeftPt : 0)),
+      indent_right_pt: Math.max(0, Math.min(300, Number.isFinite(indentRightPt) ? indentRightPt : 0)),
+      ...(includeFirstLine
+        ? {
+            first_line_indent_pt: Math.max(
+              -120,
+              Math.min(180, Number.isFinite(firstLineIndentPt) ? firstLineIndentPt : 0)
+            ),
+          }
+        : {}),
     };
+  };
+
+  const buildPreviewParagraphSegments = (): InlineSegment[] => {
+    const styleOverride = fontSizeDirty ? { font_size_pt: fontSizePt } : undefined;
 
     if (isTabbedParagraph && draftTabCols.length > 0) {
       const origGroups = groupSegmentsByTabs(block.segments ?? []);
       const combined: InlineSegment[] = [];
       draftTabCols.forEach((colText, idx) => {
+        const origFirst = origGroups[idx]?.[0];
         const parsed = editableStringToSegments(
           colText,
           origGroups[idx] ?? block.segments,
-          isBoldAll || isItalicAll ? styleOverride : { font_size_pt: fontSizePt }
+          styleOverride
         );
+        const tabMeta: Partial<InlineSegment> =
+          idx > 0
+            ? {
+                tab_before: true,
+                ...(typeof origFirst?.tab_width_pt === 'number'
+                  ? { tab_width_pt: origFirst.tab_width_pt }
+                  : {}),
+                ...(origFirst?.tab_leader ? { tab_leader: origFirst.tab_leader } : {}),
+              }
+            : {};
+
         if (parsed.length > 0) {
           if (idx > 0) {
-            parsed[0] = { ...parsed[0], tab_before: true };
+            parsed[0] = { ...parsed[0], ...tabMeta };
           }
           combined.push(...parsed);
         } else if (idx > 0) {
-          combined.push({ type: 'text', content: '', tab_before: true });
+          combined.push({ type: 'text', content: '', ...tabMeta });
         }
       });
       return combined;
     }
 
-    return editableStringToSegments(
-      draftText,
-      block.segments,
-      isBoldAll || isItalicAll || blockType === 'heading'
-        ? styleOverride
-        : { font_size_pt: fontSizePt }
+    return editableStringToSegments(draftText, block.segments, styleOverride);
+  };
+
+  const applyParagraphInlineAction = (
+    transform: (
+      text: string,
+      start: number,
+      end: number
+    ) => { text: string; start: number; end: number }
+  ) => {
+    if (isTabbedParagraph && draftTabCols.length > 0) {
+      const idx = Math.max(0, Math.min(draftTabCols.length - 1, activeTabColIdx));
+      const el = tabTextareaRefs.current[idx];
+      const current = draftTabCols[idx] ?? '';
+      const selStart = el ? el.selectionStart : 0;
+      const selEnd = el ? el.selectionEnd : 0;
+      const res = transform(current, selStart, selEnd);
+      setDraftTabCols((prev) => prev.map((v, i) => (i === idx ? res.text : v)));
+      requestAnimationFrame(() => {
+        const target = tabTextareaRefs.current[idx];
+        if (target) {
+          target.focus();
+          target.setSelectionRange(res.start, res.end);
+        }
+      });
+      return;
+    }
+
+    const el = mainTextareaRef.current;
+    const selStart = el ? el.selectionStart : 0;
+    const selEnd = el ? el.selectionEnd : 0;
+    const res = transform(draftText, selStart, selEnd);
+    setDraftText(res.text);
+    requestAnimationFrame(() => {
+      const target = mainTextareaRef.current;
+      if (target) {
+        target.focus();
+        target.setSelectionRange(res.start, res.end);
+      }
+    });
+  };
+
+  const applyActiveCellInlineAction = (
+    transform: (
+      text: string,
+      start: number,
+      end: number
+    ) => { text: string; start: number; end: number }
+  ) => {
+    if (!activeCell) return;
+    const { r, c } = activeCell;
+    const current = draftRows[r]?.[c] ?? '';
+    const key = `${r}-${c}`;
+    const el = cellTextareaRefs.current[key];
+    const selStart = el ? el.selectionStart : 0;
+    const selEnd = el ? el.selectionEnd : 0;
+    const res = transform(current, selStart, selEnd);
+    setDraftRows((prev) =>
+      prev.map((row, ri) =>
+        ri !== r ? row : row.map((val, ci) => (ci !== c ? val : res.text))
+      )
     );
+    requestAnimationFrame(() => {
+      const target = cellTextareaRefs.current[key];
+      if (target) {
+        target.focus();
+        target.setSelectionRange(res.start, res.end);
+      }
+    });
   };
 
   const handleSaveParagraphOrHeading = () => {
@@ -370,10 +513,12 @@ function InlineBlockEditor({
       nextSegments.length > 0
         ? nextSegments
         : [{ type: 'text' as const, content: '' }];
+    const posPatch = buildPositionPatch(true);
 
     if (blockType === 'heading') {
       onSave({
         ...block,
+        ...posPatch,
         block_type: 'heading',
         heading_level: headingLevel,
         alignment,
@@ -385,6 +530,7 @@ function InlineBlockEditor({
 
     onSave({
       ...block,
+      ...posPatch,
       block_type: 'paragraph',
       heading_level: null,
       alignment,
@@ -399,12 +545,17 @@ function InlineBlockEditor({
       onDelete?.();
       return;
     }
+    const posPatch = buildPositionPatch(false);
     onSave({
       ...block,
+      ...posPatch,
       block_type: 'equation',
       alignment: alignment === 'justify' ? 'center' : alignment,
       latex: cleaned,
       font_size_pt: fontSizePt,
+      bold: eqBold,
+      italic: eqItalic,
+      color: eqColor ?? undefined,
     });
   };
 
@@ -413,34 +564,47 @@ function InlineBlockEditor({
     const nextRows: TableCellData[][] = draftRows.map((row, rIdx) =>
       row.map((cellText, cIdx) => {
         const templateCell = origRows[rIdx]?.[cIdx] ?? origRows[0]?.[cIdx];
+        const nextAlign = draftCellAligns[rIdx]?.[cIdx] ?? templateCell?.alignment;
         return {
           ...(templateCell ?? {}),
+          ...(nextAlign ? { alignment: nextAlign } : {}),
           segments: editableStringToSegments(cellText, templateCell?.segments),
         };
       })
     );
+    const posPatch = buildPositionPatch(false);
     onSave({
       ...block,
+      ...posPatch,
+      alignment: alignment === 'justify' ? 'left' : alignment,
       table_rows: nextRows,
     });
   };
 
   const handleSaveFigure = () => {
+    const posPatch = buildPositionPatch(false);
     onSave({
       ...block,
+      ...posPatch,
       alignment: alignment === 'justify' ? 'center' : alignment,
       caption: draftCaption.trim() ? draftCaption.trim() : null,
     });
   };
 
-  const alignBtn = (val: BlockAlignment, label: string, Icon: typeof AlignLeft) => (
+  const alignBtn = (
+    val: BlockAlignment,
+    label: string,
+    Icon: typeof AlignLeft,
+    currentVal: BlockAlignment = alignment,
+    onChangeVal: (v: BlockAlignment) => void = setAlignment
+  ) => (
     <button
       key={val}
       type="button"
-      onClick={() => setAlignment(val)}
+      onClick={() => onChangeVal(val)}
       title={label}
       className={`p-1.5 rounded border text-xs transition-colors cursor-pointer ${
-        alignment === val
+        currentVal === val
           ? 'bg-blue-700 text-white border-blue-700'
           : 'bg-white text-slate-600 border-slate-300 hover:border-slate-400'
       }`}
@@ -449,23 +613,180 @@ function InlineBlockEditor({
     </button>
   );
 
+  const renderColorPickerBar = (
+    activeHex: string | null,
+    onPickHex: (hex: string | null) => void,
+    tooltipPrefix = 'Màu chữ'
+  ) => {
+    const currentInputHex = `#${activeHex ?? '000000'}`;
+    return (
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="text-[11px] font-medium text-slate-500 mr-0.5">{tooltipPrefix}:</span>
+        {TEXT_COLOR_SWATCHES.map((sw) => {
+          const isSelected =
+            (sw.hex === '000000' && !activeHex) || activeHex === sw.hex;
+          return (
+            <button
+              key={sw.hex}
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => onPickHex(sw.hex === '000000' ? null : sw.hex)}
+              title={`${sw.label} (#${sw.hex})`}
+              style={{ backgroundColor: `#${sw.hex}` }}
+              className={`w-4 h-4 rounded-sm border transition-transform cursor-pointer ${
+                isSelected
+                  ? 'ring-2 ring-blue-600 ring-offset-1 border-white scale-110'
+                  : 'border-slate-300 hover:scale-110'
+              }`}
+            />
+          );
+        })}
+        <label
+          title="Chọn màu tùy chỉnh"
+          className="inline-flex items-center gap-1 ml-0.5 px-1.5 h-5 text-[11px] text-slate-600 bg-white border border-slate-300 rounded cursor-pointer hover:border-slate-400"
+        >
+          <input
+            type="color"
+            value={currentInputHex}
+            onChange={(e) => {
+              const raw = e.target.value.replace(/^#/, '').toUpperCase();
+              onPickHex(raw === '000000' ? null : raw);
+            }}
+            className="w-3.5 h-3.5 border-0 p-0 bg-transparent cursor-pointer"
+          />
+          <span>Khác</span>
+        </label>
+      </div>
+    );
+  };
+
+  const renderPositionControls = (includeFirstLine: boolean) => (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 pt-1 border-t border-slate-200/80 text-[11px] text-slate-600">
+      <span className="font-semibold text-slate-700">Vị trí (pt):</span>
+      <label className="inline-flex items-center gap-1">
+        <span>Thụt trái</span>
+        <input
+          type="number"
+          min={0}
+          max={300}
+          step={2}
+          value={indentLeftPt}
+          onChange={(e) => {
+            setIndentLeftPt(Number(e.target.value) || 0);
+            setPositionDirty(true);
+          }}
+          className="w-14 h-6 px-1.5 text-xs tabular-nums text-slate-900 bg-white border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-600"
+        />
+      </label>
+      {includeFirstLine && (
+        <label className="inline-flex items-center gap-1">
+          <span>Đầu dòng</span>
+          <input
+            type="number"
+            min={-120}
+            max={180}
+            step={2}
+            value={firstLineIndentPt}
+            onChange={(e) => {
+              setFirstLineIndentPt(Number(e.target.value) || 0);
+              setPositionDirty(true);
+            }}
+            className="w-14 h-6 px-1.5 text-xs tabular-nums text-slate-900 bg-white border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-600"
+          />
+        </label>
+      )}
+      <label className="inline-flex items-center gap-1">
+        <span>Thụt phải</span>
+        <input
+          type="number"
+          min={0}
+          max={300}
+          step={2}
+          value={indentRightPt}
+          onChange={(e) => {
+            setIndentRightPt(Number(e.target.value) || 0);
+            setPositionDirty(true);
+          }}
+          className="w-14 h-6 px-1.5 text-xs tabular-nums text-slate-900 bg-white border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-600"
+        />
+      </label>
+      <label className="inline-flex items-center gap-1">
+        <span>Cách trên</span>
+        <input
+          type="number"
+          min={0}
+          max={200}
+          step={2}
+          value={spaceBeforePt}
+          onChange={(e) => {
+            setSpaceBeforePt(Number(e.target.value) || 0);
+            setPositionDirty(true);
+          }}
+          className="w-14 h-6 px-1.5 text-xs tabular-nums text-slate-900 bg-white border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-600"
+        />
+      </label>
+    </div>
+  );
+
   if (block.block_type === 'equation') {
     const cleanedPreview = cleanLatexDelimiters(draftLatex);
+    const eqFlex = JUSTIFY_FLEX_MAP[alignment === 'justify' ? 'center' : alignment] ?? 'justify-center';
     return (
       <div
-        className="my-2 p-3.5 bg-slate-50 border border-blue-500 rounded-lg shadow-xs font-sans space-y-3"
+        className="my-2 p-3.5 bg-slate-50 border border-blue-500 rounded-lg shadow-xs font-sans space-y-2.5"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className="text-xs font-semibold text-slate-800">
-            Chỉnh sửa công thức độc lập (LaTeX)
-          </span>
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs font-semibold text-slate-800 mr-1">
+              Công thức độc lập
+            </span>
+            <select
+              value={Math.round(fontSizePt)}
+              onChange={(e) => setFontSizePt(Number(e.target.value))}
+              title="Cỡ chữ công thức"
+              className="h-7 px-2 text-xs font-medium bg-white border border-slate-300 rounded text-slate-800 tabular-nums focus:outline-none focus:ring-2 focus:ring-blue-600"
+            >
+              {[10, 11, 12, 13, 14, 15, 16, 18, 20].map((sz) => (
+                <option key={sz} value={sz}>
+                  {sz} pt
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() => setEqBold((v) => !v)}
+              title="In đậm công thức"
+              className={`p-1.5 rounded border transition-colors cursor-pointer ${
+                eqBold
+                  ? 'bg-blue-700 text-white border-blue-700'
+                  : 'bg-white text-slate-700 border-slate-300 hover:border-slate-400'
+              }`}
+            >
+              <Bold className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setEqItalic((v) => !v)}
+              title="In nghiêng công thức"
+              className={`p-1.5 rounded border transition-colors cursor-pointer ${
+                eqItalic
+                  ? 'bg-blue-700 text-white border-blue-700'
+                  : 'bg-white text-slate-700 border-slate-300 hover:border-slate-400'
+              }`}
+            >
+              <Italic className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          <div className="flex items-center gap-1">
             {alignBtn('left', 'Căn trái', AlignLeft)}
             {alignBtn('center', 'Căn giữa', AlignCenter)}
             {alignBtn('right', 'Căn phải', AlignRight)}
           </div>
         </div>
+
+        {renderColorPickerBar(eqColor, setEqColor, 'Màu công thức')}
+        {renderPositionControls(false)}
 
         <textarea
           autoFocus
@@ -482,7 +803,16 @@ function InlineBlockEditor({
           className="w-full p-2.5 text-xs font-mono text-slate-900 bg-white border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-600 resize-y"
         />
 
-        <div className="p-3 bg-white border border-slate-200 rounded-md flex justify-center overflow-x-auto min-h-[44px]">
+        <div
+          style={{
+            color: eqColor ? `#${eqColor}` : undefined,
+            paddingLeft: alignment === 'center' || indentLeftPt <= 0 ? undefined : `${indentLeftPt}px`,
+            paddingRight: alignment === 'center' || indentRightPt <= 0 ? undefined : `${indentRightPt}px`,
+          }}
+          className={`p-3 bg-white border border-slate-200 rounded-md flex ${eqFlex} overflow-x-auto min-h-[44px] ${
+            eqBold ? 'katex-bold-override font-bold' : ''
+          } ${eqItalic ? 'italic' : ''}`}
+        >
           {cleanedPreview ? (
             <MathRenderer latex={cleanedPreview} displayMode={true} />
           ) : (
@@ -574,45 +904,153 @@ function InlineBlockEditor({
       activeCell && block.table_rows?.[activeCell.r]?.[activeCell.c]?.segments
         ? block.table_rows[activeCell.r][activeCell.c].segments
         : undefined;
+    const activeCellSegs = editableStringToSegments(activeCellText, activeOrigSegs);
+    const activeCellBold = isUniformBlockStyle(activeCellSegs, 'bold');
+    const activeCellItalic = isUniformBlockStyle(activeCellSegs, 'italic');
+    const activeCellUnderline = isUniformBlockStyle(activeCellSegs, 'underline');
+    const activeCellColor = getUniformBlockColor(activeCellSegs);
+    const activeCellAlign: BlockAlignment =
+      (activeCell && draftCellAligns[activeCell.r]?.[activeCell.c]) || 'left';
+
+    const setActiveCellAlign = (nextAlign: BlockAlignment) => {
+      if (!activeCell) return;
+      setDraftCellAligns((prev) =>
+        prev.map((row, ri) =>
+          ri !== activeCell.r
+            ? row
+            : row.map((a, ci) => (ci !== activeCell.c ? a : nextAlign))
+        )
+      );
+    };
 
     return (
       <div
-        className="my-2 p-3.5 bg-slate-50 border border-blue-500 rounded-lg shadow-xs font-sans space-y-3"
+        className="my-2 p-3.5 bg-slate-50 border border-blue-500 rounded-lg shadow-xs font-sans space-y-2.5"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="text-xs font-semibold text-slate-800">
             {isChoice
-              ? 'Chỉnh sửa các phương án trả lời (bọc công thức bằng $...$)'
-              : 'Chỉnh sửa nội dung bảng (bọc công thức bằng $...$)'}
+              ? 'Chỉnh sửa các phương án trả lời'
+              : 'Chỉnh sửa bảng (chọn ô để định dạng đậm/nghiêng/màu/căn lề)'}
           </span>
-          {!isChoice && (
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() =>
-                  setDraftRows((prev) => {
-                    const cols = Math.max(1, prev[0]?.length ?? 2);
-                    return [...prev, Array.from({ length: cols }, () => '')];
-                  })
-                }
-                className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-slate-700 bg-white border border-slate-300 hover:border-slate-400 rounded cursor-pointer whitespace-nowrap shrink-0"
-              >
-                <Plus className="w-3 h-3" />
-                Thêm hàng
-              </button>
-              {draftRows.length > 1 && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            {!isChoice && (
+              <>
                 <button
                   type="button"
-                  onClick={() => setDraftRows((prev) => prev.slice(0, -1))}
+                  onClick={() => {
+                    const cols = Math.max(1, draftRows[0]?.length ?? 2);
+                    setDraftRows((prev) => [...prev, Array.from({ length: cols }, () => '')]);
+                    setDraftCellAligns((prev) => [
+                      ...prev,
+                      Array.from({ length: cols }, () => undefined),
+                    ]);
+                  }}
                   className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-slate-700 bg-white border border-slate-300 hover:border-slate-400 rounded cursor-pointer whitespace-nowrap shrink-0"
                 >
-                  Xóa hàng cuối
+                  <Plus className="w-3 h-3" />
+                  Thêm hàng
                 </button>
-              )}
+                {draftRows.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDraftRows((prev) => prev.slice(0, -1));
+                      setDraftCellAligns((prev) => prev.slice(0, -1));
+                    }}
+                    className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-slate-700 bg-white border border-slate-300 hover:border-slate-400 rounded cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    Xóa hàng cuối
+                  </button>
+                )}
+              </>
+            )}
+            <div className="flex items-center gap-1 pl-1 border-l border-slate-300">
+              {alignBtn('left', 'Căn trái bảng', AlignLeft)}
+              {alignBtn('center', 'Căn giữa bảng', AlignCenter)}
+              {alignBtn('right', 'Căn phải bảng', AlignRight)}
             </div>
-          )}
+          </div>
         </div>
+
+        {activeCell && (
+          <div className="p-2 bg-white border border-slate-200 rounded-md space-y-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-1">
+                <span className="text-[11px] font-semibold text-blue-700 mr-1">
+                  Ô [{activeCell.r + 1}, {activeCell.c + 1}]:
+                </span>
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() =>
+                    applyActiveCellInlineAction((t, s, e) =>
+                      toggleInlineStyleInEditableText(t, s, e, 'bold')
+                    )
+                  }
+                  title="In đậm vùng chọn hoặc cả ô"
+                  className={`p-1 rounded border transition-colors cursor-pointer ${
+                    activeCellBold
+                      ? 'bg-blue-700 text-white border-blue-700'
+                      : 'bg-white text-slate-700 border-slate-300 hover:border-slate-400'
+                  }`}
+                >
+                  <Bold className="w-3 h-3" />
+                </button>
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() =>
+                    applyActiveCellInlineAction((t, s, e) =>
+                      toggleInlineStyleInEditableText(t, s, e, 'italic')
+                    )
+                  }
+                  title="In nghiêng vùng chọn hoặc cả ô"
+                  className={`p-1 rounded border transition-colors cursor-pointer ${
+                    activeCellItalic
+                      ? 'bg-blue-700 text-white border-blue-700'
+                      : 'bg-white text-slate-700 border-slate-300 hover:border-slate-400'
+                  }`}
+                >
+                  <Italic className="w-3 h-3" />
+                </button>
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() =>
+                    applyActiveCellInlineAction((t, s, e) =>
+                      toggleInlineStyleInEditableText(t, s, e, 'underline')
+                    )
+                  }
+                  title="Gạch chân vùng chọn hoặc cả ô"
+                  className={`p-1 rounded border transition-colors cursor-pointer ${
+                    activeCellUnderline
+                      ? 'bg-blue-700 text-white border-blue-700'
+                      : 'bg-white text-slate-700 border-slate-300 hover:border-slate-400'
+                  }`}
+                >
+                  <Underline className="w-3 h-3" />
+                </button>
+              </div>
+              <div className="flex items-center gap-1">
+                {alignBtn('left', 'Căn trái ô', AlignLeft, activeCellAlign, setActiveCellAlign)}
+                {alignBtn('center', 'Căn giữa ô', AlignCenter, activeCellAlign, setActiveCellAlign)}
+                {alignBtn('right', 'Căn phải ô', AlignRight, activeCellAlign, setActiveCellAlign)}
+              </div>
+            </div>
+            {renderColorPickerBar(
+              activeCellColor,
+              (hex) =>
+                applyActiveCellInlineAction((t, s, e) =>
+                  applyColorInEditableText(t, s, e, hex)
+                ),
+              'Màu ô'
+            )}
+          </div>
+        )}
+
+        {renderPositionControls(false)}
 
         <div className="space-y-2 overflow-x-auto">
           {draftRows.map((row, rIdx) => (
@@ -623,42 +1061,54 @@ function InlineBlockEditor({
               }}
               className="grid gap-2"
             >
-              {row.map((val, cIdx) => (
-                <textarea
-                  key={`${rIdx}-${cIdx}`}
-                  rows={2}
-                  value={val}
-                  onFocus={() => setActiveCell({ r: rIdx, c: cIdx })}
-                  onChange={(e) => {
-                    const nextVal = e.target.value;
-                    setDraftRows((prev) =>
-                      prev.map((r, ri) =>
-                        ri !== rIdx ? r : r.map((c, ci) => (ci !== cIdx ? c : nextVal))
-                      )
-                    );
-                  }}
-                  onKeyDown={(e) => {
-                    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-                      e.preventDefault();
-                      handleSaveTable();
-                    }
-                  }}
-                  className="w-full p-2 text-xs font-mono text-slate-900 bg-white border border-slate-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-600 resize-y"
-                />
-              ))}
+              {row.map((val, cIdx) => {
+                const isActive = activeCell?.r === rIdx && activeCell?.c === cIdx;
+                return (
+                  <textarea
+                    key={`${rIdx}-${cIdx}`}
+                    ref={(el) => {
+                      cellTextareaRefs.current[`${rIdx}-${cIdx}`] = el;
+                    }}
+                    rows={2}
+                    value={val}
+                    onFocus={() => setActiveCell({ r: rIdx, c: cIdx })}
+                    onChange={(e) => {
+                      const nextVal = e.target.value;
+                      setDraftRows((prev) =>
+                        prev.map((r, ri) =>
+                          ri !== rIdx ? r : r.map((c, ci) => (ci !== cIdx ? c : nextVal))
+                        )
+                      );
+                    }}
+                    onKeyDown={(e) => {
+                      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                        e.preventDefault();
+                        handleSaveTable();
+                      }
+                    }}
+                    className={`w-full p-2 text-xs font-mono text-slate-900 bg-white border rounded focus:outline-none focus:ring-2 focus:ring-blue-600 resize-y ${
+                      isActive ? 'border-blue-500' : 'border-slate-300'
+                    }`}
+                  />
+                );
+              })}
             </div>
           ))}
         </div>
 
         {activeCell && (
-          <div className="p-2.5 bg-white border border-slate-200 rounded-md doc-serif text-slate-900">
-            <div className="font-sans text-[11px] font-medium text-slate-500 mb-1">
+          <div
+            className={`p-2.5 bg-white border border-slate-200 rounded-md doc-serif text-slate-900 ${
+              ALIGN_CLASS_MAP[activeCellAlign]
+            }`}
+          >
+            <div className="font-sans text-[11px] font-medium text-slate-500 text-left mb-1">
               Xem trước ô [{activeCell.r + 1}, {activeCell.c + 1}]:
             </div>
             <div className="text-sm">
               <RenderSegments
-                segments={editableStringToSegments(activeCellText, activeOrigSegs)}
-                baseFontPt={11}
+                segments={activeCellSegs}
+                baseFontPt={fontSizePt}
                 scale={1.25}
                 mathFormat={mathFormat}
                 disableEquationInspect
@@ -669,7 +1119,7 @@ function InlineBlockEditor({
 
         <div className="flex items-center justify-between gap-2 pt-1">
           <span className="text-[11px] text-slate-500">
-            Ctrl + Enter để lưu · Esc để hủy
+            Bôi đen chữ trong ô rồi nhấn B/I/U/Màu · Ctrl + Enter để lưu
           </span>
           <div className="flex items-center gap-2">
             {onDelete && (
@@ -706,7 +1156,7 @@ function InlineBlockEditor({
   if (block.block_type === 'figure') {
     return (
       <div
-        className="my-2 p-3.5 bg-slate-50 border border-blue-500 rounded-lg shadow-xs font-sans space-y-3"
+        className="my-2 p-3.5 bg-slate-50 border border-blue-500 rounded-lg shadow-xs font-sans space-y-2.5"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -719,6 +1169,8 @@ function InlineBlockEditor({
             {alignBtn('right', 'Căn phải', AlignRight)}
           </div>
         </div>
+
+        {renderPositionControls(false)}
 
         {block.croppedImageDataUrl && (
           <div className="flex justify-center bg-white border border-slate-200 rounded p-2">
@@ -814,6 +1266,10 @@ function InlineBlockEditor({
 
   // Paragraph or Heading editor
   const previewSegments = buildPreviewParagraphSegments();
+  const uniformBold = isUniformBlockStyle(previewSegments, 'bold');
+  const uniformItalic = isUniformBlockStyle(previewSegments, 'italic');
+  const uniformUnderline = isUniformBlockStyle(previewSegments, 'underline');
+  const uniformColor = getUniformBlockColor(previewSegments);
 
   return (
     <div
@@ -843,7 +1299,10 @@ function InlineBlockEditor({
 
           <select
             value={Math.round(fontSizePt)}
-            onChange={(e) => setFontSizePt(Number(e.target.value))}
+            onChange={(e) => {
+              setFontSizePt(Number(e.target.value));
+              setFontSizeDirty(true);
+            }}
             title="Cỡ chữ"
             className="h-7 px-2 text-xs font-medium bg-white border border-slate-300 rounded text-slate-800 tabular-nums focus:outline-none focus:ring-2 focus:ring-blue-600"
           >
@@ -856,10 +1315,15 @@ function InlineBlockEditor({
 
           <button
             type="button"
-            onClick={() => setIsBoldAll((v) => !v)}
-            title="In đậm toàn đoạn"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() =>
+              applyParagraphInlineAction((t, s, e) =>
+                toggleInlineStyleInEditableText(t, s, e, 'bold')
+              )
+            }
+            title="In đậm vùng chọn hoặc toàn đoạn (**...**)"
             className={`p-1.5 rounded border transition-colors cursor-pointer ${
-              isBoldAll
+              uniformBold
                 ? 'bg-blue-700 text-white border-blue-700'
                 : 'bg-white text-slate-700 border-slate-300 hover:border-slate-400'
             }`}
@@ -869,15 +1333,38 @@ function InlineBlockEditor({
 
           <button
             type="button"
-            onClick={() => setIsItalicAll((v) => !v)}
-            title="In nghiêng toàn đoạn"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() =>
+              applyParagraphInlineAction((t, s, e) =>
+                toggleInlineStyleInEditableText(t, s, e, 'italic')
+              )
+            }
+            title="In nghiêng vùng chọn hoặc toàn đoạn (*...*)"
             className={`p-1.5 rounded border transition-colors cursor-pointer ${
-              isItalicAll
+              uniformItalic
                 ? 'bg-blue-700 text-white border-blue-700'
                 : 'bg-white text-slate-700 border-slate-300 hover:border-slate-400'
             }`}
           >
             <Italic className="w-3.5 h-3.5" />
+          </button>
+
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() =>
+              applyParagraphInlineAction((t, s, e) =>
+                toggleInlineStyleInEditableText(t, s, e, 'underline')
+              )
+            }
+            title="Gạch chân vùng chọn hoặc toàn đoạn (__...__)"
+            className={`p-1.5 rounded border transition-colors cursor-pointer ${
+              uniformUnderline
+                ? 'bg-blue-700 text-white border-blue-700'
+                : 'bg-white text-slate-700 border-slate-300 hover:border-slate-400'
+            }`}
+          >
+            <Underline className="w-3.5 h-3.5" />
           </button>
         </div>
 
@@ -888,6 +1375,17 @@ function InlineBlockEditor({
           {alignBtn('justify', 'Căn đều hai bên', AlignJustify)}
         </div>
       </div>
+
+      {renderColorPickerBar(
+        uniformColor,
+        (hex) =>
+          applyParagraphInlineAction((t, s, e) =>
+            applyColorInEditableText(t, s, e, hex)
+          ),
+        'Màu chữ'
+      )}
+
+      {renderPositionControls(true)}
 
       {isTabbedParagraph ? (
         <div
@@ -902,9 +1400,13 @@ function InlineBlockEditor({
                 Cột Tab {idx + 1}
               </div>
               <textarea
+                ref={(el) => {
+                  tabTextareaRefs.current[idx] = el;
+                }}
                 autoFocus={idx === 0}
                 rows={2}
                 value={colVal}
+                onFocus={() => setActiveTabColIdx(idx)}
                 onChange={(e) => {
                   const next = e.target.value;
                   setDraftTabCols((prev) => prev.map((v, i) => (i === idx ? next : v)));
@@ -922,6 +1424,7 @@ function InlineBlockEditor({
         </div>
       ) : (
         <textarea
+          ref={mainTextareaRef}
           autoFocus
           rows={Math.min(8, Math.max(3, Math.ceil(draftText.length / 75) + 1))}
           value={draftText}
@@ -932,32 +1435,47 @@ function InlineBlockEditor({
               handleSaveParagraphOrHeading();
             }
           }}
-          placeholder="Nhập văn bản và công thức toán bọc $...$..."
+          placeholder="Nhập văn bản (**đậm**, *nghiêng*, __gạch chân__, [#C00000]{màu}, $công thức$)..."
           className="w-full p-2.5 text-xs sm:text-sm font-mono text-slate-900 bg-white border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-600 resize-y"
         />
       )}
 
-      <div className={`p-2.5 bg-white border border-slate-200 rounded-md doc-serif text-slate-900 ${ALIGN_CLASS_MAP[alignment]}`}>
+      <div
+        className={`p-2.5 bg-white border border-slate-200 rounded-md doc-serif text-slate-900 ${ALIGN_CLASS_MAP[alignment]}`}
+      >
         <div className="font-sans text-[11px] text-slate-400 text-left mb-1">
           Xem trước hiển thị:
         </div>
-        {previewSegments.length > 0 ? (
-          <RenderSegments
-            segments={previewSegments}
-            defaultBold={false}
-            baseFontPt={fontSizePt}
-            scale={1.25}
-            mathFormat={mathFormat}
-            disableEquationInspect
-          />
-        ) : (
-          <span className="font-sans text-xs text-slate-400">(Trống)</span>
-        )}
+        <div
+          style={{
+            paddingLeft:
+              firstLineIndentPt < 0
+                ? `${indentLeftPt + Math.abs(firstLineIndentPt)}px`
+                : indentLeftPt > 0
+                ? `${indentLeftPt}px`
+                : undefined,
+            paddingRight: indentRightPt > 0 ? `${indentRightPt}px` : undefined,
+            textIndent: firstLineIndentPt !== 0 ? `${firstLineIndentPt}px` : undefined,
+          }}
+        >
+          {previewSegments.length > 0 ? (
+            <RenderSegments
+              segments={previewSegments}
+              defaultBold={false}
+              baseFontPt={fontSizePt}
+              scale={1.25}
+              mathFormat={mathFormat}
+              disableEquationInspect
+            />
+          ) : (
+            <span className="font-sans text-xs text-slate-400">(Trống)</span>
+          )}
+        </div>
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
         <span className="text-[11px] text-slate-500">
-          Dùng <code className="font-mono bg-white px-1 rounded border border-slate-200">$...$</code> cho công thức · Ctrl + Enter để lưu
+          Bôi đen chữ rồi nhấn B / I / U / Màu · Dùng <code className="font-mono bg-white px-1 rounded border border-slate-200">$...$</code> cho công thức
         </span>
         <div className="flex items-center gap-2">
           {onDelete && (
@@ -1209,6 +1727,9 @@ function RenderSingleBlock({
   if (blk.block_type === 'equation' && blk.latex) {
     const eqAlign = blk.alignment ?? 'center';
     const flexJustify = JUSTIFY_FLEX_MAP[eqAlign] ?? 'justify-center';
+    const eqHex = normalizeHexColor(blk.color);
+    const eqBold = Boolean(blk.bold);
+    const eqItalic = Boolean(blk.italic);
     if (mathFormat === 'latex') {
       const latexText = '${' + cleanLatexDelimiters(blk.latex) + '}$';
       return (
@@ -1221,11 +1742,12 @@ function RenderSingleBlock({
             paddingRight:
               eqAlign === 'center' || indentRightPt <= 0 ? undefined : `${indentRightPt * scale}px`,
             fontSize: `${baseFontPt * scale * 0.92}px`,
+            color: eqHex ? `#${eqHex}` : '#000000',
           }}
-          className={`flex ${flexJustify}`}
+          className={`flex ${flexJustify} ${eqBold ? 'font-bold' : ''} ${eqItalic ? 'italic' : ''}`}
         >
           {disableEquationInspect ? (
-            <span className="font-mono px-2 py-1 rounded-md bg-amber-50 text-slate-900 border border-amber-200/80">
+            <span className="font-mono px-2 py-1 rounded-md bg-amber-50 border border-amber-200/80">
               {latexText}
             </span>
           ) : (
@@ -1237,7 +1759,7 @@ function RenderSingleBlock({
                 onSelectEquation?.(blk.latex ?? '', true);
               }}
               title="Công thức Toggle TeX bọc ${...}$ — nhấn để xem chi tiết"
-              className="font-mono px-2 py-1 rounded-md bg-amber-50 text-slate-900 border border-amber-200/80 hover:bg-amber-100/80 transition-colors cursor-pointer"
+              className="font-mono px-2 py-1 rounded-md bg-amber-50 border border-amber-200/80 hover:bg-amber-100/80 transition-colors cursor-pointer"
             >
               {latexText}
             </button>
@@ -1253,8 +1775,11 @@ function RenderSingleBlock({
           paddingLeft: eqAlign === 'center' || indentLeftPt <= 0 ? undefined : `${indentLeftPt * scale}px`,
           paddingRight: eqAlign === 'center' || indentRightPt <= 0 ? undefined : `${indentRightPt * scale}px`,
           fontSize: `${baseFontPt * scale}px`,
+          color: eqHex ? `#${eqHex}` : undefined,
         }}
-        className={`flex ${flexJustify}`}
+        className={`flex ${flexJustify} ${eqBold ? 'katex-bold-override font-bold' : ''} ${
+          eqItalic ? 'italic' : ''
+        }`}
       >
         {disableEquationInspect ? (
           <span className="px-2 py-1 rounded-md">
@@ -1553,7 +2078,7 @@ function RenderSingleBlock({
                           <RenderSegments
                             segments={cell.segments}
                             defaultBold={false}
-                            baseFontPt={isBorderless || isBox ? baseFontPt : Math.min(baseFontPt, 11)}
+                            baseFontPt={baseFontPt}
                             scale={scale}
                             mathFormat={mathFormat}
                             disableEquationInspect={disableEquationInspect}
@@ -1791,6 +2316,12 @@ export function DocumentPreview({
                 <InlineBlockEditor
                   block={sourceBlock}
                   mathFormat={mathFormat}
+                  initialPosition={{
+                    spaceBeforePt: options.spaceBeforePt,
+                    indentLeftPt: options.indentLeftPt,
+                    indentRightPt: options.indentRightPt,
+                    firstLineIndentPt: options.firstLineIndentPt,
+                  }}
                   onSave={(nextBlk) => {
                     onUpdateBlock?.(page.pageNumber, srcIdx, nextBlk);
                     setEditingTarget(null);
@@ -1965,12 +2496,12 @@ export function DocumentPreview({
               key={page.pageNumber}
               style={{
                 maxWidth: `${previewWidthPx}px`,
-                paddingTop: `${geom.marginTopPt * scale * 0.65}px`,
+                paddingTop: `${geom.marginTopPt * scale}px`,
                 paddingRight: `${geom.marginRightPt * scale}px`,
                 paddingBottom: `${geom.marginBottomPt * scale}px`,
                 paddingLeft: `${geom.marginLeftPt * scale}px`,
               }}
-              className="bg-white border border-slate-200 rounded-lg shadow-xs mx-auto doc-serif text-slate-900"
+              className="bg-white border border-slate-200 rounded-lg shadow-xs mx-auto doc-serif text-black"
             >
               <div className="flex items-center justify-between gap-2 pb-2.5 mb-4 border-b border-slate-100 font-sans text-xs text-slate-400">
                 <span>Trang {page.pageNumber}</span>
