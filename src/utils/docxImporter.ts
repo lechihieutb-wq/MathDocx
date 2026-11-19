@@ -1119,6 +1119,14 @@ function parseTableElement(
       const spanVal = Number(getAttr(tcPr ? getFirstChild(tcPr, 'gridSpan') : null, 'val') ?? 1);
       const colSpan = Number.isFinite(spanVal) && spanVal > 1 ? Math.round(spanVal) : 1;
 
+      const vMergeEl = tcPr ? getFirstChild(tcPr, 'vMerge') : null;
+      const vMergeAttr = vMergeEl ? getAttr(vMergeEl, 'val') : null;
+      const vMerge: 'restart' | 'continue' | undefined = vMergeEl
+        ? vMergeAttr === 'restart'
+          ? 'restart'
+          : 'continue'
+        : undefined;
+
       const shdFill = getAttr(tcPr ? getFirstChild(tcPr, 'shd') : null, 'fill');
       const hasShading = Boolean(
         shdFill && shdFill.toUpperCase() !== 'AUTO' && shdFill.toUpperCase() !== 'FFFFFF'
@@ -1160,6 +1168,7 @@ function parseTableElement(
         segments: cellSegments,
         alignment: cellAlignment,
         ...(colSpan > 1 ? { col_span: colSpan } : {}),
+        ...(vMerge ? { v_merge: vMerge } : {}),
         ...(widthPct ? { width_pct: widthPct } : {}),
         is_header: !isBorderless && rIdx === 0 && (hasShading || allBold),
       });

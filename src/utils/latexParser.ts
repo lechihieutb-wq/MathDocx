@@ -7848,6 +7848,57 @@ export function promoteNumbersAndSignsToMathSegments(
   return out;
 }
 
+export function fixBareSetBracesInMath(latex: string): string {
+  if (!latex || !latex.includes('{')) return latex;
+  let out = '';
+  let i = 0;
+  while (i < latex.length) {
+    if (latex[i] === '\\') {
+      out += latex.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
+    if (latex[i] === '{') {
+      const beforeTrim = out.trimEnd();
+      const precededBySetOp =
+        /(?:=|\\in|\\notin|\\subset|\\subseteq|\\supset|\\supseteq|\\cup|\\cap|\\setminus|\\neq)$/.test(
+          beforeTrim
+        );
+      if (precededBySetOp) {
+        // Find matching unescaped closing '}'
+        let depth = 1;
+        let j = i + 1;
+        while (j < latex.length && depth > 0) {
+          if (latex[j] === '\\') {
+            j += 2;
+            continue;
+          }
+          if (latex[j] === '{') depth++;
+          else if (latex[j] === '}') depth--;
+          j++;
+        }
+        if (depth === 0) {
+          const closeIdx = j - 1;
+          const inner = latex.slice(i + 1, closeIdx);
+          const after = latex.slice(closeIdx + 1).trimStart();
+          const hasScriptAfter = after.startsWith('^') || after.startsWith('_');
+          const looksLikeSet =
+            /(?:\\in(?![a-zA-Z])|\\mid(?![a-zA-Z])|\||;|,)/.test(inner) ||
+            (/\\setminus$/.test(beforeTrim) && inner.trim().length > 0);
+          if (!hasScriptAfter && looksLikeSet) {
+            out += '\\{' + fixBareSetBracesInMath(inner) + '\\}';
+            i = closeIdx + 1;
+            continue;
+          }
+        }
+      }
+    }
+    out += latex[i];
+    i += 1;
+  }
+  return out;
+}
+
 export function normalizeSegmentListInlineMath(
   segments?: InlineSegment[] | null,
   options: { isTableCell?: boolean } = {}
@@ -7855,6 +7906,11 @@ export function normalizeSegmentListInlineMath(
   if (!segments || segments.length === 0) return segments ?? undefined;
   const splitResult: InlineSegment[] = [];
   for (const seg of segments) {
+    if (seg.type === 'math') {
+      const fixed = fixBareSetBracesInMath(seg.content ?? '');
+      splitResult.push(fixed !== seg.content ? { ...seg, content: fixed } : seg);
+      continue;
+    }
     if (
       seg.type !== 'text' ||
       (!seg.content.includes('$') &&
@@ -7866,7 +7922,9 @@ export function normalizeSegmentListInlineMath(
       continue;
     }
     const { type: _t, content, tab_before, ...style } = seg;
-    const split = splitTextPreservingInlineMath(content, style);
+    const split = splitTextPreservingInlineMath(content, style).map((s) =>
+      s.type === 'math' ? { ...s, content: fixBareSetBracesInMath(s.content) } : s
+    );
     if (tab_before && split.length > 0) {
       split[0] = { ...split[0], tab_before: true };
     }
@@ -7878,6 +7936,9 @@ export function normalizeSegmentListInlineMath(
 function normalizeBlockListInlineMath(blocks: DocumentBlock[]): DocumentBlock[] {
   return blocks.map((blk) => ({
     ...blk,
+    ...(blk.block_type === 'equation' && blk.latex
+      ? { latex: fixBareSetBracesInMath(blk.latex) }
+      : {}),
     ...(blk.segments ? { segments: normalizeSegmentListInlineMath(blk.segments) } : {}),
     ...(blk.table_rows
       ? {

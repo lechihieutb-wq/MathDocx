@@ -38,6 +38,8 @@ export interface TableCellData {
   v_align?: 'top' | 'center' | 'bottom' | null;
   width_pct?: number | null;
   col_span?: number | null;
+  row_span?: number | null;
+  v_merge?: 'restart' | 'continue' | null;
   border_top?: boolean | null;
   border_bottom?: boolean | null;
   border_left?: boolean | null;

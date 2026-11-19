@@ -16,6 +16,7 @@ import {
   isValidBox,
   normalizeBoxHexColor,
   normalizeHexColor,
+  normalizeTableBlockGrid,
   splitSegmentsIntoChoiceGroups,
   type PageGeometry,
   type VisualBand,
@@ -391,9 +392,10 @@ function renderTableLatex(
   page: PageExtraction,
   registry: ImageRegistry
 ): string {
-  const rows = blk.table_rows;
+  const normBlk = normalizeTableBlockGrid(blk);
+  const rows = normBlk.table_rows;
   if (!rows || rows.length === 0) return '';
-  const baseFontPt = blk.font_size_pt ?? page.base_font_size_pt ?? 12;
+  const baseFontPt = normBlk.font_size_pt ?? page.base_font_size_pt ?? 12;
 
   // Choice table in basic LaTeX mode: keep crisp multi-column layout
   if (isChoiceTableBlock(blk)) {

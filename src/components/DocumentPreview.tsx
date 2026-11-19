@@ -28,12 +28,14 @@ import type {
 import {
   cleanLatexDelimiters,
   computePageGeometry,
+  computeSafeTableColPcts,
   groupBlocksIntoVisualBands,
   groupSegmentsByTabs,
   isChoiceTableBlock,
   isValidBox,
   normalizeBoxHexColor,
   normalizeHexColor,
+  normalizeTableBlockGrid,
   transformBlocksForChoiceLayout,
   type PageGeometry,
 } from '../utils/layoutMetrics';
@@ -1277,30 +1279,37 @@ function RenderSingleBlock({
   }
 
   if (blk.block_type === 'table' && blk.table_rows && blk.table_rows.length > 0) {
-    const tableStyle = blk.table_style ?? (blk.table_borderless ? 'borderless' : 'grid');
+    const normalizedTable = normalizeTableBlockGrid(blk);
+    const tableRows = normalizedTable.table_rows ?? blk.table_rows;
+    const tableStyle =
+      normalizedTable.table_style ?? (normalizedTable.table_borderless ? 'borderless' : 'grid');
     const isBorderless = tableStyle === 'borderless';
     const isBooktabs = tableStyle === 'booktabs';
     const isBox = tableStyle === 'box';
     const isGrid = tableStyle === 'grid';
-    const colBorders = Array.isArray(blk.table_col_borders) ? blk.table_col_borders : null;
-
-    const maxCols = Math.max(
-      ...blk.table_rows.map((r) => r.reduce((acc, c) => acc + Math.max(1, c.col_span ?? 1), 0)),
-      1
-    );
-    const rowWithWidths = blk.table_rows.find(
-      (r) =>
-        r.length === maxCols &&
-        r.every((c) => typeof c.width_pct === 'number' && (c.width_pct ?? 0) > 0 && !(c.col_span && c.col_span > 1))
-    );
-    const colPcts = rowWithWidths
-      ? (() => {
-          const sum = rowWithWidths.reduce((s, c) => s + (c.width_pct ?? 0), 0);
-          return rowWithWidths.map((c) => ((c.width_pct ?? 0) / Math.max(1, sum)) * 100);
-        })()
+    const colBorders = Array.isArray(normalizedTable.table_col_borders)
+      ? normalizedTable.table_col_borders
       : null;
 
-    const totalRows = blk.table_rows.length;
+    const maxCols = Math.max(
+      ...tableRows.map((r) => r.reduce((acc, c) => acc + Math.max(1, c.col_span ?? 1), 0)),
+      1
+    );
+    const availTablePt = Math.max(140, geom.contentWidthPt - indentLeftPt - indentRightPt);
+    const colPcts = computeSafeTableColPcts(tableRows, maxCols, availTablePt, isBorderless);
+
+    const totalRows = tableRows.length;
+
+    const getCellAtCol = (row: TableCellData[], targetCol: number): TableCellData | null => {
+      let c = 0;
+      for (const cell of row) {
+        const sp = Math.max(1, cell.col_span ?? 1);
+        if (c === targetCol) return cell;
+        if (c > targetCol) return null;
+        c += sp;
+      }
+      return null;
+    };
 
     return (
       <div
@@ -1323,7 +1332,7 @@ function RenderSingleBlock({
             </colgroup>
           )}
           <tbody>
-            {blk.table_rows.map((row, rIdx) => {
+            {tableRows.map((row, rIdx) => {
               let colCursor = 0;
               const rowWidthSum = row.reduce((s, c) => s + (c.width_pct ?? 0), 0) || 100;
               return (
@@ -1332,6 +1341,22 @@ function RenderSingleBlock({
                     const span = Math.max(1, cell.col_span ?? 1);
                     const startCol = colCursor;
                     colCursor += span;
+
+                    if (cell.v_merge === 'continue') {
+                      return null;
+                    }
+
+                    let rowSpanCount = 1;
+                    if (cell.v_merge === 'restart') {
+                      for (let nr = rIdx + 1; nr < totalRows; nr++) {
+                        const below = getCellAtCol(tableRows[nr], startCol);
+                        if (below && below.v_merge === 'continue') {
+                          rowSpanCount += 1;
+                        } else {
+                          break;
+                        }
+                      }
+                    }
 
                     const isHeader = Boolean(cell.is_header) && !isBorderless;
                     const cellAlign = cell.alignment ?? (isHeader && !isBox ? 'center' : 'left');
@@ -1447,6 +1472,7 @@ function RenderSingleBlock({
                       <td
                         key={cIdx}
                         colSpan={span > 1 ? span : undefined}
+                        rowSpan={rowSpanCount > 1 ? rowSpanCount : undefined}
                         style={cellStyle}
                         className={`${padClass} ${vAlignClass} ${
                           defaultHeaderFill ? 'bg-slate-100' : ''

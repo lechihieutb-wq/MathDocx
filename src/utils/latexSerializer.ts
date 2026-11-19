@@ -4,7 +4,11 @@ import type {
   PageExtraction,
 } from '../types/document.ts';
 import type { EmbeddedFigureAsset } from './latexParser.ts';
-import { cleanLatexDelimiters, normalizeHexColor } from './layoutMetrics.ts';
+import {
+  cleanLatexDelimiters,
+  normalizeHexColor,
+  normalizeTableBlockGrid,
+} from './layoutMetrics.ts';
 
 function escapeLatexPlainText(text: string): string {
   return text
@@ -126,23 +130,34 @@ export function pagesToLatexSource(pages: PageExtraction[]): {
       }
 
       if (blk.block_type === 'table' && blk.table_rows && blk.table_rows.length > 0) {
+        const normBlk = normalizeTableBlockGrid(blk);
+        const normRows = normBlk.table_rows ?? blk.table_rows;
         const colCount = Math.max(
           1,
-          ...blk.table_rows.map((row) =>
+          ...normRows.map((row) =>
             row.reduce((acc, cell) => acc + Math.max(1, cell.col_span ?? 1), 0)
           )
         );
         const firstRowAligns = Array.from({ length: colCount }, (_, cIdx) => {
-          const align = blk.table_rows?.[0]?.[cIdx]?.alignment;
+          const align = normRows?.[0]?.[cIdx]?.alignment;
           return align === 'center' ? 'c' : align === 'right' ? 'r' : 'l';
         });
-        const isBorderless = Boolean(blk.table_borderless);
+        const isBorderless = Boolean(normBlk.table_borderless);
         const colSpec = isBorderless
           ? firstRowAligns.join('')
           : `|${firstRowAligns.join('|')}|`;
 
-        const rowLines = blk.table_rows.map((row) => {
-          const cells = row.map((cell) => segmentsToLatex(cell.segments, true) || ' ');
+        const rowLines = normRows.map((row) => {
+          const cells = row.map((cell) => {
+            const inner = segmentsToLatex(cell.segments, true) || ' ';
+            const span = Math.max(1, cell.col_span ?? 1);
+            if (span > 1) {
+              const a = cell.alignment === 'center' ? 'c' : cell.alignment === 'right' ? 'r' : 'l';
+              const spec = isBorderless ? a : `|${a}|`;
+              return `\\multicolumn{${span}}{${spec}}{${inner}}`;
+            }
+            return inner;
+          });
           return `  ${cells.join(' & ')} \\\\`;
         });
 
@@ -152,7 +167,7 @@ export function pagesToLatexSource(pages: PageExtraction[]): {
 
         const tblLatex = `\\begin{tabular}{${colSpec}}\n${tableBody}\n\\end{tabular}`;
         blockStrings.push(
-          blk.alignment === 'center' ? `\\begin{center}\n${tblLatex}\n\\end{center}` : tblLatex
+          normBlk.alignment === 'center' ? `\\begin{center}\n${tblLatex}\n\\end{center}` : tblLatex
         );
         continue;
       }

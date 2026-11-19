@@ -11,10 +11,12 @@ import type {
 import { normalizeSegmentListInlineMath } from '../src/utils/latexParser.ts';
 import {
   computePageGeometry,
+  computeSafeTableColPcts,
   groupBlocksIntoVisualBands,
   isValidBox,
   normalizeBoxHexColor,
   normalizeHexColor,
+  normalizeTableBlockGrid,
   transformBlocksForChoiceLayout,
   type PageGeometry,
   type VisualBand,
@@ -421,7 +423,8 @@ function renderTableXml(
     mathFormat?: MathOutputFormat;
   }
 ): string {
-  const rows = block.table_rows ?? [];
+  const normalizedBlock = normalizeTableBlockGrid(block);
+  const rows = normalizedBlock.table_rows ?? [];
   if (rows.length === 0) return '';
 
   const safeSpan = (rawSpan: unknown): number => finiteInt(rawSpan, 1, 1, 63);
@@ -443,12 +446,14 @@ function renderTableXml(
   const safeIndentLeft = finiteInt(indentLeftTwip, 0, 0, 20_000);
   const safeSpaceBefore = finiteInt(spaceBeforeTwip, 0, 0, 20_000);
 
-  const tableStyle = block.table_style ?? (block.table_borderless ? 'borderless' : 'grid');
+  const tableStyle = normalizedBlock.table_style ?? (normalizedBlock.table_borderless ? 'borderless' : 'grid');
   const isBorderless = tableStyle === 'borderless';
   const isBooktabs = tableStyle === 'booktabs';
   const isBox = tableStyle === 'box';
   const isGrid = tableStyle === 'grid';
-  const colBorders = Array.isArray(block.table_col_borders) ? block.table_col_borders : null;
+  const colBorders = Array.isArray(normalizedBlock.table_col_borders)
+    ? normalizedBlock.table_col_borders
+    : null;
 
   const baseColW = Math.max(120, Math.floor(totalWidthDxa / maxCols));
   const colWidthsDxa: number[] = new Array(maxCols).fill(baseColW);
@@ -459,41 +464,28 @@ function renderTableXml(
     }
   }
 
-  const rowWithWidths = rows.find(
-    (r) =>
-      r.length === maxCols &&
-      r.every(
-        (c) =>
-          typeof c.width_pct === 'number' &&
-          Number.isFinite(c.width_pct) &&
-          (c.width_pct ?? 0) > 0 &&
-          !(c.col_span && c.col_span > 1)
-      )
-  );
-  if (rowWithWidths) {
-    const pctSum = rowWithWidths.reduce((s, c) => s + (c.width_pct ?? 0), 0);
-    if (Number.isFinite(pctSum) && pctSum > 0) {
-      let assigned = 0;
-      const minColW = Math.min(360, Math.max(120, Math.floor(totalWidthDxa / maxCols)));
-      rowWithWidths.forEach((c, idx) => {
-        if (idx === maxCols - 1) {
-          colWidthsDxa[idx] = Math.max(minColW, totalWidthDxa - assigned);
-        } else {
-          const maxAllow = Math.max(
-            minColW,
-            totalWidthDxa - assigned - minColW * (maxCols - 1 - idx)
-          );
-          const w = finiteInt(
-            ((c.width_pct ?? 0) / pctSum) * totalWidthDxa,
-            minColW,
-            minColW,
-            maxAllow
-          );
-          colWidthsDxa[idx] = w;
-          assigned += w;
-        }
-      });
-    }
+  const safeColPcts = computeSafeTableColPcts(rows, maxCols, totalWidthDxa / 20, isBorderless);
+  if (safeColPcts) {
+    let assigned = 0;
+    const minColW = Math.min(360, Math.max(120, Math.floor(totalWidthDxa / maxCols)));
+    safeColPcts.forEach((pct, idx) => {
+      if (idx === maxCols - 1) {
+        colWidthsDxa[idx] = Math.max(minColW, totalWidthDxa - assigned);
+      } else {
+        const maxAllow = Math.max(
+          minColW,
+          totalWidthDxa - assigned - minColW * (maxCols - 1 - idx)
+        );
+        const w = finiteInt(
+          (pct / 100) * totalWidthDxa,
+          minColW,
+          minColW,
+          maxAllow
+        );
+        colWidthsDxa[idx] = w;
+        assigned += w;
+      }
+    });
   }
 
   const resolvedTableWidthDxa = colWidthsDxa.reduce((a, b) => a + b, 0);
@@ -553,6 +545,12 @@ function renderTableXml(
           ? '<w:shd w:val="clear" w:color="auto" w:fill="F1F5F9"/>'
           : '';
         const gridSpanXml = span > 1 ? `<w:gridSpan w:val="${span}"/>` : '';
+        const vMergeXml =
+          cell.v_merge === 'restart'
+            ? '<w:vMerge w:val="restart"/>'
+            : cell.v_merge === 'continue'
+            ? '<w:vMerge/>'
+            : '';
 
         const borderHex =
           normalizeBoxHexColor(cell.border_color) ??
@@ -703,9 +701,9 @@ function renderTableXml(
           });
         }
 
-        // Strict ECMA-376 CT_TcPrInner child order: tcW -> gridSpan -> tcBorders -> shd -> vAlign
+        // Strict ECMA-376 CT_TcPrInner child order: tcW -> gridSpan -> vMerge -> tcBorders -> shd -> vAlign
         cellsXml.push(
-          `<w:tc><w:tcPr><w:tcW w:w="${cellWidthDxa}" w:type="dxa"/>${gridSpanXml}${tcBordersXml}${shading}${vAlignXml}</w:tcPr>${cellContentXml}</w:tc>`
+          `<w:tc><w:tcPr><w:tcW w:w="${cellWidthDxa}" w:type="dxa"/>${gridSpanXml}${vMergeXml}${tcBordersXml}${shading}${vAlignXml}</w:tcPr>${cellContentXml}</w:tc>`
         );
       }
 

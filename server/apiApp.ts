@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import type { PageExtraction } from '../src/types/document.ts';
 import { normalizePagesInlineMath } from '../src/utils/latexParser.ts';
+import { normalizePagesTableGrids } from '../src/utils/layoutMetrics.ts';
 import { buildDocxBuffer } from './docxBuilder.ts';
 import { latexToOmmlXml } from './omml.ts';
 
@@ -132,6 +133,8 @@ const pageExtractionSchema = {
           },
           table_rows: {
             type: Type.ARRAY,
+            description:
+              'CRITICAL: Every row MUST span the EXACT same total number of columns (sum of col_span) as the header row! Never omit empty leading/middle cells or cells covered by a vertical merge (rowspan) from a row above: ALWAYS include an empty placeholder cell {"segments": []} (with v_merge="continue" if vertically merged from above) at the exact column position so subsequent columns never shift left.',
             items: {
               type: Type.ARRAY,
               items: {
@@ -152,7 +155,15 @@ const pageExtractionSchema = {
                   },
                   col_span: {
                     type: Type.INTEGER,
-                    description: 'Number of columns spanned by this cell (default 1).',
+                    description: 'Number of columns spanned horizontally by this cell (default 1).',
+                  },
+                  row_span: {
+                    type: Type.INTEGER,
+                    description: 'Number of rows spanned vertically by this cell if vertically merged (default 1).',
+                  },
+                  v_merge: {
+                    type: Type.STRING,
+                    description: "Set 'restart' on the top cell of a vertically merged column group, and 'continue' on each empty placeholder cell below it in the same column.",
                   },
                 },
                 required: ['segments'],
@@ -201,8 +212,13 @@ Quy tắc bắt buộc:
    - Với đường kẻ ngang phân cách (như dưới tiêu đề đề thi), xuất block_type="horizontal_rule" kèm box_2d.
 4. CÔNG THỨC TOÁN, CHỮ SỐ, DẤU +/- & BẢNG BIỂU:
    - MỌI biểu thức toán học, ký hiệu biến số, phân số, căn thức, tích phân, giới hạn, ma trận, hệ phương trình PHẢI tách thành segment type="math" (nếu nằm cùng dòng với chữ) hoặc block_type="equation" (nếu đứng riêng một dòng độc lập, giữ đúng alignment của công thức). Luôn xuất mã LaTeX chuẩn xác, KHÔNG bọc bằng $, $$, \\[ \\] hay \\( \\).
+   - DẤU NGOẶC NHỌN TẬP HỢP & TÁCH CHỮ TIẾNG VIỆT KHỎI MATH: Với ký hiệu tập hợp trong LaTeX math, BẮT BUỘC phải dùng \\{ và \\} (ví dụ: B = \\{x \\in \\mathbb{Z} \\mid x^2 - 3x + 2 = 0\\}, B = \\{1; 2\\}), TUYỆT ĐỐI KHÔNG viết { } trần. TUYỆT ĐỐI KHÔNG gom từ tiếng Việt (như "a) Phương trình", "Do", "nên", "hoặc", "với", "suy ra") vào bên trong segment type="math" — mọi chữ tiếng Việt PHẢI nằm ở segment type="text", chỉ phần công thức toán mới đặt type="math".
    - BẮT BUỘC đưa TẤT CẢ các số mang ý nghĩa toán học (số nguyên, số thập phân, số âm/dương như 0, 1, -2, +3, 2,5...) và các dấu cộng (+), dấu trừ (-) đứng riêng hoặc gắn với số (ví dụ: "dấu +", "dấu -", "+∞", "-∞") vào segment type="math" (KHÔNG để ở type="text"). Chỉ giữ trong type="text" các số thứ tự nhãn như "Câu 1.", "Bài 2.", "Hình 1", "Bảng 1".
-   - Bảng số liệu thông thường (bảng thống kê, bảng tần số, bảng điểm, bảng giá trị chỉ gồm chữ/số trong ô, KHÔNG có mũi tên biến thiên): BẮT BUỘC giữ nguyên thành block_type="table" với table_borderless=false và is_choice_block=false, ghi đủ 100% số hàng/cột, col_span, is_header và segments.
+   - Bảng số liệu thông thường (bảng thống kê, bảng tần số, bảng điểm, bảng hướng dẫn chấm "Bài | Nội dung | Điểm", bảng giá trị chỉ gồm chữ/số trong ô, KHÔNG có mũi tên biến thiên): BẮT BUỘC giữ nguyên thành block_type="table" với table_borderless=false và is_choice_block=false, ghi đủ 100% số hàng/cột, col_span, is_header và segments.
+   - QUY TẮC TUYỆT ĐỐI CHO BẢNG CÓ Ô TRỐNG HOẶC Ô GỘP DỌC (ROWSPAN — NHƯ BẢNG "Bài | Nội dung | Điểm"):
+     + MỌI hàng trong table_rows BẮT BUỘC phải có tổng số cột (tổng col_span) BẰNG NHAU và bằng đúng số cột của hàng tiêu đề!
+     + Khi một cột ở đầu hàng hoặc giữa hàng bị TRỐNG (ví dụ cột "Bài" trống ở các dòng lời giải tiếp theo dưới "Bài 1") HOẶC bị GỘP DỌC từ hàng trên xuống (rowspan), BẮT BUỘC VẪN PHẢI xuất một ô rỗng {"segments": []} (kèm v_merge="continue" nếu gộp dọc, và v_merge="restart" ở ô đầu tiên phía trên) tại ĐÚNG vị trí cột đó!
+     + TUYỆT ĐỐI KHÔNG ĐƯỢC bỏ qua ô trống ở cột 1 khiến nội dung cột 2 ("Nội dung") bị dịch sang cột 1 ("Bài") và cột 3 ("Điểm") bị dịch sang cột 2 ("Nội dung")!
    - TUYỆT ĐỐI KHÔNG chuyển Bảng biến thiên (bảng có dòng x, y'/f'(x), y/f(x) kèm mũi tên tăng giảm ↗ ↘ hoặc hai gạch đứng ∥) thành block_type="table".
 5. HÌNH VẼ MINH HỌA & BẢNG BIẾN THIÊN (CHỤP CẮT ẢNH CHÍNH XÁC):
    - Với mọi hình học không gian/phẳng, đồ thị hàm số, trục số, biểu đồ, ảnh chụp nhúng VÀ MỌI BẢNG BIẾN THIÊN (có dòng x, y'/f'(x), y/f(x) và mũi tên ↗, ↘, dấu +, -, hai gạch đứng ∥), BẮT BUỘC phải xuất thành MỘT block_type="figure" duy nhất, alignment đúng vị trí ('left'/'center'/'right').
@@ -407,9 +423,9 @@ export async function handleOcrPage(req: RequestWithOptionalBody, res: ServerRes
     const rawJson = (response.text ?? '{"blocks":[]}').trim();
     const parsed = JSON.parse(rawJson) as { blocks?: PageExtraction['blocks'] };
     const rawBlocks = Array.isArray(parsed.blocks) ? parsed.blocks : [];
-    const [normalizedPage] = normalizePagesInlineMath([
-      { pageNumber: pageNumber ?? 1, blocks: rawBlocks },
-    ]);
+    const [normalizedPage] = normalizePagesTableGrids(
+      normalizePagesInlineMath([{ pageNumber: pageNumber ?? 1, blocks: rawBlocks }])
+    );
     sendJson(res, 200, {
       pageNumber: pageNumber ?? 1,
       blocks: normalizedPage?.blocks ?? rawBlocks,

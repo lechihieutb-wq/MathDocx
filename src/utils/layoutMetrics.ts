@@ -661,6 +661,545 @@ function ensureTabStopsOnChoiceParagraph(
   ];
 }
 
+function getCellPlainText(cell: TableCellData): string {
+  return (cell.segments ?? [])
+    .map((s) => s.content ?? '')
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function safeTableSpan(val?: number | null): number {
+  if (typeof val !== 'number' || !Number.isFinite(val)) return 1;
+  return Math.max(1, Math.min(20, Math.round(val)));
+}
+
+const SCORE_HEADER_RE =
+  /^(?:điểm|thang\s*điểm|số\s*điểm|biểu\s*điểm|tỉ\s*lệ|tỷ\s*lệ|%|đáp\s*án|kết\s*quả|ghi\s*chú)$/i;
+const SCORE_CELL_RE = /^\d+(?:[.,]\d+)?(?:\s*(?:đ|điểm|%))?$/i;
+const INDEX_HEADER_RE =
+  /^(?:bài|câu|stt|tt|phần|mục|chương|chủ\s*đề|ý|bước|lệnh|vấn\s*đề)$/i;
+const INDEX_CELL_RE =
+  /^(?:(?:bài|câu|phần|mục|ý|chương)\s*(?:\d+|[IVXLCDM]+|[a-zA-Z])(?:\.\d+)?[.:)]?|(?:\d+|[IVXLCDM]+)[.:)]?)$/i;
+const CONTENT_HEADER_RE =
+  /^(?:nội\s*dung|hướng\s*dẫn|lời\s*giải|yêu\s*cầu|diễn\s*giải|mô\s*tả|đề\s*bài|câu\s*hỏi|trả\s*lời|kiến\s*thức|nhiệm\s*vụ|chi\s*tiết)/i;
+
+interface ColumnProfile {
+  headerText: string;
+  widthPct: number | null;
+  bodyAlign: 'left' | 'center' | 'right' | 'justify' | null;
+  avgBodyLen: number;
+  isScoreCol: boolean;
+  isIndexCol: boolean;
+  isContentCol: boolean;
+}
+
+function buildColumnProfiles(rows: TableCellData[][], maxCols: number): ColumnProfile[] {
+  const headerTexts: string[] = new Array(maxCols).fill('');
+  const widthSamples: number[][] = Array.from({ length: maxCols }, () => []);
+  const alignCounts: Array<Record<string, number>> = Array.from({ length: maxCols }, () => ({}));
+  const bodyLens: number[][] = Array.from({ length: maxCols }, () => []);
+  const bodyTexts: string[][] = Array.from({ length: maxCols }, () => []);
+
+  rows.forEach((row, rIdx) => {
+    const rowSpanSum = row.reduce((s, c) => s + safeTableSpan(c.col_span), 0);
+    if (rowSpanSum !== maxCols) return;
+
+    const allSingleWidth =
+      row.length === maxCols &&
+      row.every(
+        (c) =>
+          typeof c.width_pct === 'number' &&
+          Number.isFinite(c.width_pct) &&
+          (c.width_pct ?? 0) > 0 &&
+          safeTableSpan(c.col_span) === 1
+      );
+    const widthSum = allSingleWidth
+      ? row.reduce((s, c) => s + (c.width_pct ?? 0), 0)
+      : 0;
+
+    let colCursor = 0;
+    for (const cell of row) {
+      const span = safeTableSpan(cell.col_span);
+      if (span === 1 && colCursor < maxCols) {
+        const txt = getCellPlainText(cell);
+        if (rIdx === 0 && !headerTexts[colCursor]) {
+          headerTexts[colCursor] = txt;
+        }
+        if (allSingleWidth && widthSum > 0) {
+          widthSamples[colCursor].push(((cell.width_pct ?? 0) / widthSum) * 100);
+        }
+        if (rIdx > 0 || rows.length === 1) {
+          if (cell.alignment) {
+            alignCounts[colCursor][cell.alignment] =
+              (alignCounts[colCursor][cell.alignment] ?? 0) + 1;
+          }
+          if (txt.length > 0) {
+            bodyLens[colCursor].push(txt.length);
+            bodyTexts[colCursor].push(txt);
+          }
+        }
+      }
+      colCursor += span;
+    }
+  });
+
+  return Array.from({ length: maxCols }, (_, c) => {
+    const hTxt = headerTexts[c];
+    const wList = widthSamples[c];
+    const widthPct =
+      wList.length > 0
+        ? wList.slice().sort((a, b) => a - b)[Math.floor(wList.length / 2)]
+        : null;
+
+    let bodyAlign: ColumnProfile['bodyAlign'] = null;
+    let bestAlignCnt = 0;
+    for (const [k, cnt] of Object.entries(alignCounts[c])) {
+      if (cnt > bestAlignCnt) {
+        bestAlignCnt = cnt;
+        bodyAlign = k as ColumnProfile['bodyAlign'];
+      }
+    }
+
+    const lens = bodyLens[c];
+    const avgBodyLen =
+      lens.length > 0 ? lens.reduce((a, b) => a + b, 0) / lens.length : 0;
+    const texts = bodyTexts[c];
+    const scoreMatches = texts.filter((t) => SCORE_CELL_RE.test(t)).length;
+    const indexMatches = texts.filter((t) => INDEX_CELL_RE.test(t)).length;
+
+    const isScoreCol =
+      SCORE_HEADER_RE.test(hTxt) ||
+      (texts.length >= 1 &&
+        scoreMatches / texts.length >= 0.65 &&
+        !INDEX_HEADER_RE.test(hTxt) &&
+        !CONTENT_HEADER_RE.test(hTxt));
+    const isIndexCol =
+      INDEX_HEADER_RE.test(hTxt) ||
+      (c === 0 &&
+        texts.length >= 1 &&
+        indexMatches / texts.length >= 0.65 &&
+        !SCORE_HEADER_RE.test(hTxt) &&
+        !CONTENT_HEADER_RE.test(hTxt));
+    const isContentCol =
+      CONTENT_HEADER_RE.test(hTxt) ||
+      (!isScoreCol &&
+        !isIndexCol &&
+        ((widthPct !== null && widthPct >= 42) || avgBodyLen >= 22));
+
+    return {
+      headerText: hTxt,
+      widthPct,
+      bodyAlign,
+      avgBodyLen,
+      isScoreCol,
+      isIndexCol,
+      isContentCol,
+    };
+  });
+}
+
+function scoreCellAtColumn(cell: TableCellData, colIdx: number, profile: ColumnProfile): number {
+  const txt = getCellPlainText(cell);
+  const len = txt.length;
+  let score = 0;
+
+  if (len === 0) {
+    return 0;
+  }
+
+  // 1. Width similarity when both cell and profile have width_pct
+  if (
+    typeof cell.width_pct === 'number' &&
+    Number.isFinite(cell.width_pct) &&
+    cell.width_pct > 0 &&
+    profile.widthPct !== null
+  ) {
+    const diff = Math.abs(cell.width_pct - profile.widthPct);
+    if (diff <= 8) score += 6;
+    else if (diff <= 18) score += 2;
+    else score -= Math.min(10, diff / 6);
+  }
+
+  // 2. Numeric / score pattern
+  const isScore = SCORE_CELL_RE.test(txt);
+  if (isScore && profile.isScoreCol) score += 10;
+  else if (isScore && profile.isContentCol && !profile.isScoreCol) score -= 7;
+  else if (!isScore && len >= 14 && profile.isScoreCol) score -= 10;
+
+  // 3. Index / question label pattern ("Bài 1", "Câu 2", "1", "I")
+  const isIndex = INDEX_CELL_RE.test(txt);
+  if (isIndex && profile.isIndexCol) score += 9;
+  else if (isIndex && profile.isContentCol) score -= 5;
+  else if (!isIndex && profile.isIndexCol) {
+    if (len >= 16) score -= 10;
+    else if (len >= 8) score -= 7;
+    else if (/^[a-d]\)\s*/i.test(txt)) score -= 6;
+  }
+
+  // 4. Long content / prose placement
+  if (len >= 15 && profile.isContentCol) score += 8;
+  else if (len >= 8 && profile.isContentCol && !isScore && !isIndex) score += 4;
+  if (len >= 10 && profile.widthPct !== null && profile.widthPct < 16) score -= 6;
+  if (len >= 10 && profile.widthPct !== null && profile.widthPct >= 40) score += 4;
+
+  // 5. Horizontal alignment match
+  if (cell.alignment && profile.bodyAlign) {
+    if (cell.alignment === profile.bodyAlign) {
+      score += 2;
+    } else if (
+      (cell.alignment === 'center' && profile.bodyAlign === 'left') ||
+      (cell.alignment === 'left' && profile.bodyAlign === 'center')
+    ) {
+      score -= 2;
+    }
+  }
+
+  return score;
+}
+
+function alignShortRowToColumns(
+  row: TableCellData[],
+  maxCols: number,
+  profiles: ColumnProfile[]
+): TableCellData[] {
+  const m = row.length;
+  const spans = row.map((c) => safeTableSpan(c.col_span));
+  const totalSpan = spans.reduce((a, b) => a + b, 0);
+  if (totalSpan >= maxCols || m === 0 || maxCols > 12 || maxCols - totalSpan > 6) {
+    return row;
+  }
+
+  // Compute default left-aligned slots and score
+  const defaultSlots: number[] = [];
+  let defCursor = 0;
+  let defaultScore = 0;
+  for (let i = 0; i < m; i++) {
+    defaultSlots.push(defCursor);
+    defaultScore += scoreCellAtColumn(row[i], defCursor, profiles[defCursor]) - 0.01 * defCursor;
+    defCursor += spans[i];
+  }
+
+  let bestScore = -Infinity;
+  let bestSlots: number[] = defaultSlots;
+  const currentSlots: number[] = new Array(m).fill(0);
+
+  const suffixSpan = new Array(m + 1).fill(0);
+  for (let i = m - 1; i >= 0; i--) {
+    suffixSpan[i] = suffixSpan[i + 1] + spans[i];
+  }
+
+  const dfs = (cellIdx: number, minSlot: number, accScore: number) => {
+    if (cellIdx === m) {
+      if (accScore > bestScore) {
+        bestScore = accScore;
+        bestSlots = currentSlots.slice();
+      }
+      return;
+    }
+    const maxSlot = maxCols - suffixSpan[cellIdx];
+    const cell = row[cellIdx];
+    const span = spans[cellIdx];
+    for (let slot = minSlot; slot <= maxSlot; slot++) {
+      currentSlots[cellIdx] = slot;
+      const cellScore =
+        span === 1
+          ? scoreCellAtColumn(cell, slot, profiles[slot]) - 0.01 * slot
+          : -0.01 * slot;
+      dfs(cellIdx + 1, slot + span, accScore + cellScore);
+    }
+  };
+
+  dfs(0, 0, 0);
+
+  const changed = bestSlots.some((s, i) => s !== defaultSlots[i]);
+  const chosenSlots = changed && bestScore > defaultScore + 1.5 ? bestSlots : defaultSlots;
+
+  const aligned: TableCellData[] = [];
+  let cursor = 0;
+  for (let i = 0; i < m; i++) {
+    const targetSlot = chosenSlots[i];
+    while (cursor < targetSlot) {
+      const prof = profiles[cursor];
+      aligned.push({
+        segments: [],
+        alignment: prof?.bodyAlign ?? 'left',
+        ...(prof?.widthPct ? { width_pct: Math.round(prof.widthPct * 10) / 10 } : {}),
+      });
+      cursor += 1;
+    }
+    aligned.push(row[i]);
+    cursor += spans[i];
+  }
+  while (cursor < maxCols) {
+    const prof = profiles[cursor];
+    aligned.push({
+      segments: [],
+      alignment: prof?.bodyAlign ?? 'left',
+      ...(prof?.widthPct ? { width_pct: Math.round(prof.widthPct * 10) / 10 } : {}),
+    });
+    cursor += 1;
+  }
+
+  return aligned;
+}
+
+export function normalizeTableBlockGrid(blk: DocumentBlock): DocumentBlock {
+  if (blk.block_type !== 'table' || !blk.table_rows || blk.table_rows.length === 0) {
+    return blk;
+  }
+
+  // First recursively normalize any nested table blocks inside cells
+  let rows: TableCellData[][] = blk.table_rows.map((row) =>
+    row.map((cell) => {
+      if (Array.isArray(cell.blocks) && cell.blocks.length > 0) {
+        return {
+          ...cell,
+          blocks: cell.blocks.map((b) =>
+            b.block_type === 'table' ? normalizeTableBlockGrid(b) : b
+          ),
+        };
+      }
+      return { ...cell };
+    })
+  );
+
+  let maxCols = Math.max(
+    1,
+    ...rows.map((r) => r.reduce((acc, c) => acc + safeTableSpan(c.col_span), 0))
+  );
+
+  // Pass 1: Expand explicit row_span > 1 into v_merge ('restart' / 'continue') placeholder cells
+  const hasAnyRowSpan = rows.some((r) =>
+    r.some((c) => typeof c.row_span === 'number' && c.row_span > 1)
+  );
+  if (hasAnyRowSpan && maxCols >= 2) {
+    const activeSpans: Array<{
+      remaining: number;
+      alignment?: TableCellData['alignment'];
+      width_pct?: number | null;
+    }> = Array.from({ length: maxCols }, () => ({ remaining: 0 }));
+
+    rows = rows.map((row) => {
+      const rowSpanSum = row.reduce((acc, c) => acc + safeTableSpan(c.col_span), 0);
+      const occupiedCols = activeSpans.reduce((acc, s) => acc + (s.remaining > 0 ? 1 : 0), 0);
+      const needsInsertion = occupiedCols > 0 && rowSpanSum + occupiedCols <= maxCols;
+
+      const outRow: TableCellData[] = [];
+      let srcIdx = 0;
+      let col = 0;
+
+      while (col < maxCols) {
+        if (activeSpans[col].remaining > 0) {
+          if (needsInsertion) {
+            outRow.push({
+              segments: [],
+              v_merge: 'continue',
+              alignment: activeSpans[col].alignment ?? 'left',
+              ...(activeSpans[col].width_pct ? { width_pct: activeSpans[col].width_pct } : {}),
+            });
+            activeSpans[col].remaining -= 1;
+            col += 1;
+            continue;
+          } else if (srcIdx < row.length) {
+            const existing = row[srcIdx];
+            const span = safeTableSpan(existing.col_span);
+            if (getCellPlainText(existing) === '' && span === 1) {
+              outRow.push({ ...existing, v_merge: 'continue' });
+              activeSpans[col].remaining -= 1;
+              srcIdx += 1;
+              col += 1;
+              continue;
+            }
+          }
+        }
+
+        if (srcIdx >= row.length) break;
+        const cell = { ...row[srcIdx++] };
+        const span = safeTableSpan(cell.col_span);
+        const rSpan =
+          typeof cell.row_span === 'number' && Number.isFinite(cell.row_span)
+            ? Math.max(1, Math.round(cell.row_span))
+            : 1;
+        if (rSpan > 1) {
+          cell.v_merge = 'restart';
+          for (let k = 0; k < span && col + k < maxCols; k++) {
+            activeSpans[col + k] = {
+              remaining: rSpan - 1,
+              alignment: cell.alignment,
+              width_pct: span === 1 ? cell.width_pct : null,
+            };
+          }
+        }
+        outRow.push(cell);
+        col += span;
+      }
+
+      while (srcIdx < row.length) {
+        outRow.push(row[srcIdx++]);
+      }
+
+      return outRow;
+    });
+
+    maxCols = Math.max(
+      1,
+      ...rows.map((r) => r.reduce((acc, c) => acc + safeTableSpan(c.col_span), 0))
+    );
+  }
+
+  // Pass 2: Repair short rows where empty leading/middle cells were omitted (e.g. OCR skipped merged col 0)
+  if (maxCols >= 2 && rows.length >= 2) {
+    const hasShortRow = rows.some(
+      (r) => r.reduce((acc, c) => acc + safeTableSpan(c.col_span), 0) < maxCols
+    );
+    if (hasShortRow) {
+      const profiles = buildColumnProfiles(rows, maxCols);
+      rows = rows.map((row) => {
+        const spanSum = row.reduce((acc, c) => acc + safeTableSpan(c.col_span), 0);
+        if (spanSum < maxCols) {
+          return alignShortRowToColumns(row, maxCols, profiles);
+        }
+        return row;
+      });
+    }
+  }
+
+  // Pass 3: Sanitize orphaned v_merge='continue' (must have restart/continue directly above)
+  const prevRowMergeAtCol: boolean[] = new Array(maxCols).fill(false);
+  rows = rows.map((row) => {
+    const nextMergeAtCol: boolean[] = new Array(maxCols).fill(false);
+    let col = 0;
+    const cleanedRow = row.map((cell) => {
+      const span = safeTableSpan(cell.col_span);
+      let nextCell = cell;
+      if (cell.v_merge === 'continue' && !prevRowMergeAtCol[col]) {
+        nextCell = { ...cell, v_merge: null };
+      }
+      if (nextCell.v_merge === 'restart' || nextCell.v_merge === 'continue') {
+        for (let k = 0; k < span && col + k < maxCols; k++) {
+          nextMergeAtCol[col + k] = true;
+        }
+      }
+      col += span;
+      return nextCell;
+    });
+    for (let k = 0; k < maxCols; k++) prevRowMergeAtCol[k] = nextMergeAtCol[k];
+    return cleanedRow;
+  });
+
+  return {
+    ...blk,
+    table_rows: rows,
+  };
+}
+
+export function normalizePagesTableGrids(pages: PageExtraction[]): PageExtraction[] {
+  return pages.map((page) => ({
+    ...page,
+    blocks: page.blocks.map((blk) =>
+      blk.block_type === 'table' ? normalizeTableBlockGrid(blk) : blk
+    ),
+  }));
+}
+
+export function computeSafeTableColPcts(
+  rows: TableCellData[][],
+  maxCols: number,
+  availWidthPt: number,
+  isBorderless: boolean
+): number[] | null {
+  if (maxCols <= 0 || rows.length === 0) return null;
+
+  // Prefer a full row whose single-span cells all have valid width_pct
+  const fullWidthRows = rows.filter(
+    (r) =>
+      r.length === maxCols &&
+      r.every(
+        (c) =>
+          typeof c.width_pct === 'number' &&
+          Number.isFinite(c.width_pct) &&
+          (c.width_pct ?? 0) > 0 &&
+          safeTableSpan(c.col_span) === 1
+      )
+  );
+  if (fullWidthRows.length === 0) return null;
+
+  // Use median per column across all rows with explicit widths for stability
+  const normalizedRows = fullWidthRows.map((r) => {
+    const sum = r.reduce((s, c) => s + (c.width_pct ?? 0), 0);
+    return r.map((c) => ((c.width_pct ?? 0) / Math.max(1, sum)) * 100);
+  });
+
+  const colPcts = Array.from({ length: maxCols }, (_, c) => {
+    const vals = normalizedRows.map((r) => r[c]).sort((a, b) => a - b);
+    return vals[Math.floor(vals.length / 2)];
+  });
+
+  const sumPct = colPcts.reduce((a, b) => a + b, 0);
+  if (!Number.isFinite(sumPct) || sumPct <= 0) return null;
+  for (let c = 0; c < maxCols; c++) {
+    colPcts[c] = (colPcts[c] / sumPct) * 100;
+  }
+
+  // For bordered tables, prevent narrow columns (e.g. "Bài", "Điểm", "0,25") from clipping single-token headers/numbers
+  if (!isBorderless && maxCols >= 2 && availWidthPt > 120) {
+    const minNeededPct = new Array(maxCols).fill(0);
+    const cellPadPt = 16;
+
+    for (let c = 0; c < maxCols; c++) {
+      let maxTokenWidthPt = 0;
+      for (let rIdx = 0; rIdx < rows.length; rIdx++) {
+        const row = rows[rIdx];
+        let col = 0;
+        for (const cell of row) {
+          const span = safeTableSpan(cell.col_span);
+          if (col === c && span === 1) {
+            const txt = getCellPlainText(cell);
+            if (txt.length > 0 && txt.length <= 12) {
+              const tokens = txt.split(/\s+/).filter(Boolean);
+              const longestTok = tokens.reduce((m, t) => Math.max(m, t.length), 0);
+              const estPt = longestTok * 6.4 + cellPadPt;
+              if (estPt > maxTokenWidthPt) maxTokenWidthPt = estPt;
+            }
+          }
+          col += span;
+        }
+      }
+      if (maxTokenWidthPt > 0) {
+        const capPct = Math.min(14, 100 / (maxCols + 0.5));
+        minNeededPct[c] = Math.min(capPct, (maxTokenWidthPt / availWidthPt) * 100);
+      }
+    }
+
+    let deficit = 0;
+    const adjusted = colPcts.slice();
+    for (let c = 0; c < maxCols; c++) {
+      if (adjusted[c] < minNeededPct[c]) {
+        deficit += minNeededPct[c] - adjusted[c];
+        adjusted[c] = minNeededPct[c];
+      }
+    }
+
+    if (deficit > 0) {
+      const donorIndices = adjusted
+        .map((pct, idx) => ({ idx, surplus: pct - Math.max(minNeededPct[idx], 22) }))
+        .filter((d) => d.surplus > 1);
+      const totalSurplus = donorIndices.reduce((s, d) => s + d.surplus, 0);
+      if (totalSurplus > 0) {
+        const take = Math.min(deficit, totalSurplus);
+        for (const d of donorIndices) {
+          adjusted[d.idx] -= take * (d.surplus / totalSurplus);
+        }
+        const finalSum = adjusted.reduce((a, b) => a + b, 0);
+        return adjusted.map((p) => (p / finalSum) * 100);
+      }
+    }
+  }
+
+  return colPcts;
+}
+
 function applyUnderlineToChoiceCell(cell: TableCellData): TableCellData {
   if (!cell.is_correct || !cell.segments || cell.segments.length === 0) return cell;
   const firstIdx = cell.segments.findIndex((s) => s.type === 'text' && (s.content ?? '').length > 0);
@@ -705,7 +1244,9 @@ export function transformBlocksForChoiceLayout(
 ): DocumentBlock[] {
   const result: DocumentBlock[] = [];
 
-  for (const blk of blocks) {
+  for (const rawBlk of blocks) {
+    const blk = rawBlk.block_type === 'table' ? normalizeTableBlockGrid(rawBlk) : rawBlk;
+
     if (blk.block_type === 'table' && blk.table_rows && blk.table_rows.some((r) => r.some((c) => c.blocks && c.blocks.length > 0))) {
       const transformedRows = blk.table_rows.map((row) => {
         const totalPct = row.reduce((s, c) => s + (c.width_pct ?? 0), 0) || 100;
