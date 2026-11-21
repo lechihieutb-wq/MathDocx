@@ -797,20 +797,18 @@ export default function App() {
           );
           if (figureBlocks.length === 0) return page;
 
-          const figRawBoxes = figureBlocks.map((b) => b.box_2d);
           const neighborBoxes = blocksClone
             .filter(
               (blk): blk is DocumentBlock & { box_2d: number[] } =>
                 blk.block_type !== 'figure' &&
                 Array.isArray(blk.box_2d) &&
-                blk.box_2d.length === 4 &&
-                !isBoxMostlyInsideAnyFigure(blk.box_2d, figRawBoxes)
+                blk.box_2d.length === 4
             )
             .map((b) => b.box_2d);
 
           const croppedList = await cropFiguresFromPage(
             sourcePage,
-            figRawBoxes,
+            figureBlocks.map((b) => b.box_2d),
             0.014,
             neighborBoxes
           );
