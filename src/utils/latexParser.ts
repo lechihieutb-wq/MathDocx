@@ -6,7 +6,12 @@ import type {
   TableCellData,
   TabStopSpec,
 } from '../types/document.ts';
-import { evaluateTikzMathExpr, renderLatexPictureToSvgDataUrl } from './tikzRenderer.ts';
+import {
+  computeTdplotMainCoordsStyle,
+  evaluateTikzMathExpr,
+  extractTikzStylesFromSetBody,
+  renderLatexPictureToSvgDataUrl,
+} from './tikzRenderer.ts';
 
 export type LatexPasteMode = 'auto' | 'bare_latex';
 
@@ -259,6 +264,7 @@ interface ParserContext {
   lastNumberedKind: string | null;
   customTheorems: Record<string, CustomTheoremDef>;
   customColors: Record<string, string>;
+  customTikzStyles: Record<string, string>;
   defaultTasksLabel?: string;
   figureAssets?: Record<string, EmbeddedFigureAsset>;
   pageConfig: DocumentPageConfig;
@@ -268,7 +274,7 @@ function createParserContext(
   initial?: Partial<
     Pick<
       ParserContext,
-      'isVietnamese' | 'labels' | 'labelKinds' | 'cites' | 'customTheorems' | 'customColors' | 'defaultTasksLabel' | 'figureAssets' | 'pageConfig'
+      'isVietnamese' | 'labels' | 'labelKinds' | 'cites' | 'customTheorems' | 'customColors' | 'customTikzStyles' | 'defaultTasksLabel' | 'figureAssets' | 'pageConfig'
     >
   >
 ): ParserContext {
@@ -286,6 +292,7 @@ function createParserContext(
     lastNumberedKind: null,
     customTheorems: initial?.customTheorems ?? {},
     customColors: initial?.customColors ?? {},
+    customTikzStyles: initial?.customTikzStyles ?? {},
     defaultTasksLabel: initial?.defaultTasksLabel,
     figureAssets: initial?.figureAssets,
     pageConfig: initial?.pageConfig ?? createDefaultPageConfig(),
@@ -1380,6 +1387,7 @@ function preprocessDocumentAndMacros(raw: string): {
   isVietnamese: boolean;
   customTheorems: Record<string, CustomTheoremDef>;
   customColors: Record<string, string>;
+  customTikzStyles: Record<string, string>;
   defaultTasksLabel?: string;
   pageConfig: DocumentPageConfig;
 } {
@@ -1431,6 +1439,7 @@ function preprocessDocumentAndMacros(raw: string): {
   const envMacros: ExtractedEnvMacro[] = [];
   const customTheorems: Record<string, CustomTheoremDef> = {};
   const customColors: Record<string, string> = {};
+  const customTikzStyles: Record<string, string> = {};
 
   const parseMacrosIntoMap = (src: string, target: Map<string, ExtractedMacro>) => {
     // Collect preamble macros in source order (excluding \def\f(#1){...} TikZ function defs)
@@ -1652,6 +1661,27 @@ function preprocessDocumentAndMacros(raw: string): {
     }
   }
 
+  // Parse \tikzset{...}, \tikzstyle{name}=[...], and \tdplotsetmaincoords{theta}{phi}
+  const tikzSetDeclRe = /\\tikzset\s*\{/g;
+  while ((m = tikzSetDeclRe.exec(macroSrc)) !== null) {
+    const br = readBalancedBraces(macroSrc, m.index + m[0].length - 1);
+    if (br) extractTikzStylesFromSetBody(br.content, customTikzStyles);
+  }
+  const tikzStyleDeclRe = /\\tikzstyle\s*\{([^}]+)\}\s*=\s*\[/g;
+  while ((m = tikzStyleDeclRe.exec(macroSrc)) !== null) {
+    const sName = m[1].trim();
+    const brk = readBalancedBrackets(macroSrc, m.index + m[0].length - 1);
+    if (sName && brk) customTikzStyles[sName] = brk.content.trim();
+  }
+  const tdplotDeclRe = /\\tdplotsetmaincoords\s*\{([^}]+)\}\s*\{([^}]+)\}/g;
+  while ((m = tdplotDeclRe.exec(macroSrc)) !== null) {
+    const th = evaluateTikzMathExpr(m[1]);
+    const ph = evaluateTikzMathExpr(m[2]);
+    if (th !== null && ph !== null) {
+      customTikzStyles['tdplot_main_coords'] = computeTdplotMainCoordsStyle(th, ph);
+    }
+  }
+
   // Parse \settasks{label=...}
   let defaultTasksLabel: string | undefined;
   const setTasksRe = /\\settasks\s*\{/g;
@@ -1667,7 +1697,7 @@ function preprocessDocumentAndMacros(raw: string): {
   // (macro definitions are processed sequentially in scoped order below so per-figure \def/\pgfmathsetmacro never leaks globally)
   const preambleThreeArgCmds = /\\(?:definecolor|providecolor|xdefinecolor|DeclareMathAlphabet|SetMathAlphabet)(?![a-zA-Z])/;
   const preambleTwoArgCmds =
-    /\\(?:setlength|addtolength|setcounter|addtocounter|numberwithin|colorlet|fontsize|lstdefinestyle|DeclareTColorBox|newtcbox|inputansbox|inputans)(?![a-zA-Z])/;
+    /\\(?:setlength|addtolength|setcounter|addtocounter|numberwithin|colorlet|fontsize|lstdefinestyle|DeclareTColorBox|newtcbox|inputansbox|inputans|tdplotsetmaincoords)(?![a-zA-Z])/;
   const preambleOneArgCmds =
     /\\(?:documentclass|usepackage|RequirePackage|geometry|hypersetup|lstset|tikzset|pgfplotsset|tcbset|tcbuselibrary|setlist|settasks|pagestyle|thispagestyle|pagenumbering|bibliographystyle|bibliography|addbibresource|linespread|theoremstyle|newtheoremstyle|graphicspath|DeclareUnicodeCharacter|sisetup|captionsetup|AtBeginDocument|fancyhf|fancyhead|fancyfoot|rhead|lhead|chead|rfoot|lfoot|cfoot|setmainfont|setsansfont|setmonofont|newfontfamily|selectlanguage|usetikzlibrary|usepgfplotslibrary|tkzSetUpPoint|tkzSetUpLine|tkzSetUpLabel|tkzSetUpStyle|tkzTabSetup|titleformat|titlespacing|newtheorem\*?|input|include|allowdisplaybreaks|qedsymbol|showansEX|showans|hideansEX|hideans|ansEX|Opensolutionfile|Closesolutionfile|writelist)(?![a-zA-Z])/;
   const preambleZeroArgCmds =
@@ -2344,6 +2374,7 @@ function preprocessDocumentAndMacros(raw: string): {
     isVietnamese,
     customTheorems,
     customColors,
+    customTikzStyles,
     defaultTasksLabel,
     pageConfig,
   };
@@ -5839,7 +5870,7 @@ function parseBodyBlocks(
           if (br) {
             flushTextSlice(i);
             const tikzBody = tikzOpts ? `[${tikzOpts}]\n${br.content}` : br.content;
-            const rendered = renderLatexPictureToSvgDataUrl('tikzpicture', tikzBody, ctx.customColors);
+            const rendered = renderLatexPictureToSvgDataUrl('tikzpicture', tikzBody, ctx.customColors, ctx.customTikzStyles);
             if (rendered) {
               pushBlock({
                 block_type: 'figure',
@@ -7155,7 +7186,8 @@ function parseBodyBlocks(
             const rendered = renderLatexPictureToSvgDataUrl(
               envName,
               envRawBody,
-              ctx.customColors
+              ctx.customColors,
+              ctx.customTikzStyles
             );
             if (rendered) {
               pushBlock({
@@ -8068,6 +8100,7 @@ export function parsePastedLatexToPages(
     isVietnamese,
     customTheorems,
     customColors,
+    customTikzStyles,
     defaultTasksLabel,
     pageConfig,
   } = preprocessDocumentAndMacros(rawText);
@@ -8077,6 +8110,7 @@ export function parsePastedLatexToPages(
     isVietnamese,
     customTheorems,
     customColors,
+    customTikzStyles,
     defaultTasksLabel,
     figureAssets,
     pageConfig,
