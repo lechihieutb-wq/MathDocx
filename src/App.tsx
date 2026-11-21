@@ -1820,29 +1820,7 @@ export default function App() {
             </a>
           </nav>
 
-          <div className="flex items-center gap-2 shrink-0">
-            {displayPreviewPages.length > 0 && (
-              <button
-                type="button"
-                onClick={() => void handleDownloadLatexZip()}
-                disabled={isExportingLatexZip || isConverting}
-                className="inline-flex items-center gap-1.5 px-2.5 py-0.5 text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
-              >
-                <FileArchive className="w-3.5 h-3.5" />
-                Tải .tex (.zip)
-              </button>
-            )}
-            {docxDownloadUrl && (
-              <a
-                href={docxDownloadUrl}
-                download={docxFileName}
-                className="inline-flex items-center gap-1.5 px-2.5 py-0.5 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-md transition-colors whitespace-nowrap shrink-0"
-              >
-                <Download className="w-3.5 h-3.5" />
-                Tải xuống file Word
-              </a>
-            )}
-          </div>
+          <div className="flex items-center gap-2 shrink-0" />
         </div>
       </header>
 
@@ -2575,16 +2553,6 @@ export default function App() {
                         + Dán thêm trang ảnh
                       </button>
                     )}
-                    <button
-                      type="button"
-                      onClick={handleClearSelectedFile}
-                      disabled={isConverting || isLoadingFile}
-                      title="Tắt file đang chọn"
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 disabled:opacity-50 rounded-lg transition-colors cursor-pointer"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                      Tắt file
-                    </button>
                   </div>
                 </section>
                 {activeTab === 'original' ? (
